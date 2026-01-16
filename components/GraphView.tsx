@@ -60,8 +60,9 @@ export default function GraphView({
   const hoveredNodeRef = useRef<string | null>(null);
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const graphRef = useRef<Graph | null>(null);
-  const hasFitCameraRef = useRef<boolean>(false);
-  const savedRatioRef = useRef<number | null>(null);
+  const cameraStateRef = useRef<{ x: number; y: number; ratio: number } | null>(
+    null
+  );
 
   useEffect(() => {
     if (!containerRef.current || sigmaRef.current) return;
@@ -110,7 +111,6 @@ export default function GraphView({
     const graph = graphRef.current;
     if (!sigma || !graph) return;
 
-    // Remove all existing listeners first; NOTE: best practices
     sigma.removeAllListeners("clickNode");
     sigma.removeAllListeners("enterNode");
     sigma.removeAllListeners("leaveNode");
@@ -242,9 +242,19 @@ export default function GraphView({
     const sigma = sigmaRef.current;
     if (!graph || !sigma || nodes.length === 0) return;
 
-    // Force refresh of event handlers
-    if (sigma) {
-      sigma.refresh();
+    // Save current camera state before rebuilding - BUT ONLY IF IT'S NOT DEFAULT
+    const camera = sigma.getCamera();
+    const currentState = camera.getState();
+
+    // Only save if we have a valid non-default state AND it was previously set
+    if (
+      cameraStateRef.current !== null &&
+      currentState.ratio !== 1 &&
+      currentState.x !== 0.5 &&
+      currentState.y !== 0.5
+    ) {
+      cameraStateRef.current = currentState;
+    } else {
     }
 
     graph.clear();
@@ -436,27 +446,18 @@ export default function GraphView({
 
       positions.set(nodeId, adjusted);
     });
+
     nodes.forEach((node) => {
       const pos = positions.get(node.id) ?? {
         x: Math.random() * 800,
         y: Math.random() * 800,
       };
 
-      const connections = node.edgesFrom.length + node.edgesTo.length; // NOTE: not needed anymore
-
-      // Check if node is reference/example/contradiction type // NOTE: not needed anymore
-      const isSpecialType = node.edgesTo.some(
-        (e) =>
-          e.type === "reference" ||
-          e.type === "example" ||
-          e.type === "contradiction"
-      );
-
-      // Determine node color
-      let color = "#5D0E41";
       const specialInfo = Array.from(specialNodes.entries()).find(
         ([id]) => id === node.id
       );
+
+      let color = "#5D0E41";
 
       if (specialInfo) {
         const [_, info] = specialInfo;
@@ -536,9 +537,12 @@ export default function GraphView({
       });
     });
 
-    const camera = sigma.getCamera();
-
-    if (!hasFitCameraRef.current) {
+    // Restore or set camera position - FORCE IT AFTER REFRESH
+    if (cameraStateRef.current) {
+      // Restore saved camera state
+      camera.setState(cameraStateRef.current);
+    } else {
+      // Initial setup - calculate bounds
       let minX = Infinity,
         maxX = -Infinity;
       let minY = Infinity,
@@ -564,46 +568,44 @@ export default function GraphView({
       const ratioY = graphHeight / containerHeight;
       const calculatedRatio = Math.max(ratioX, ratioY);
 
-      const MIN_RATIO = 2.0; // NOTE: important variables, responsible for default zoom of the camera
-      const ZOOM_PADDING = 1.4; // !!important!!
+      const MIN_RATIO = 0.2; // Lower = more zoomed in
+      const ZOOM_PADDING = 0.5; // Lower = more zoomed in
 
       const finalRatio = Math.max(calculatedRatio * ZOOM_PADDING, MIN_RATIO);
 
-      camera.setState({
-        x: centerX,
-        y: centerY,
+      const newState = {
+        x: 0.5,
+        y: 0.5,
         ratio: finalRatio,
-      });
+      };
 
-      savedRatioRef.current = finalRatio;
-      hasFitCameraRef.current = true;
-
-      sigma.refresh();
-    } else {
-      const currentState = camera.getState();
-
-      if (savedRatioRef.current && currentState.ratio === 1) {
-        camera.setState({
-          x: currentState.x,
-          y: currentState.y,
-          ratio: savedRatioRef.current,
-        });
-      }
+      camera.setState(newState);
+      cameraStateRef.current = newState;
     }
+
+    sigma.refresh();
+
+    setTimeout(() => {
+      if (cameraStateRef.current) {
+        const currentCameraState = camera.getState();
+
+        if (
+          Math.abs(currentCameraState.ratio - cameraStateRef.current.ratio) >
+          0.1
+        ) {
+          camera.setState(cameraStateRef.current);
+          sigma.refresh();
+        }
+      }
+    }, 100);
   }, [nodes, isLinkMode, linkFromNodeId, selectedTarget]);
 
   useEffect(() => {
     return () => {
       try {
-        if (hoverTimeoutRef.current) {
-          clearTimeout(hoverTimeoutRef.current);
-        }
-        if (clickTimeoutRef.current) {
-          clearTimeout(clickTimeoutRef.current);
-        }
-        if (sigmaRef.current) {
-          sigmaRef.current.kill();
-        }
+        if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+        if (clickTimeoutRef.current) clearTimeout(clickTimeoutRef.current);
+        if (sigmaRef.current) sigmaRef.current.kill();
       } catch (e) {
         console.error("Cleanup error:", e);
       }
@@ -617,7 +619,6 @@ export default function GraphView({
       <div className="w-full h-full flex items-center justify-center">
         <button
           onClick={(e) => {
-            const rect = e.currentTarget.getBoundingClientRect(); // REVIEW: not needed anymore
             onEmptyDoubleClick(window.innerWidth / 2, window.innerHeight / 2);
           }}
           className="px-8 py-4 bg-[#5D0E41] hover:bg-[#A0153E] text-white rounded-lg text-base font-medium transition-all duration-200 hover:shadow-lg"
