@@ -568,8 +568,8 @@ export default function GraphView({
       const ratioY = graphHeight / containerHeight;
       const calculatedRatio = Math.max(ratioX, ratioY);
 
-      const MIN_RATIO = 0.2; // Lower = more zoomed in
-      const ZOOM_PADDING = 0.5; // Lower = more zoomed in
+      const MIN_RATIO = 1.2; // Lower = more zoomed in
+      const ZOOM_PADDING = 1.2; // Lower = more zoomed in
 
       const finalRatio = Math.max(calculatedRatio * ZOOM_PADDING, MIN_RATIO);
 
