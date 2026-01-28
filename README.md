@@ -1,38 +1,149 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Knowledge Tree Kn-🦉-⭕-🌳
+
+A minimalist graph-based knowledge management system inspired by Zettelkasten methodology. Visualize and connect your thoughts in an interactive network.
+
+## Idea
+
+I would like to have simple ui/web tool, where i would manage my knowledge as a graph, kinda similar as zettlekasten, without using obsedian with millions of plugins.
+
+## Overview
+
+Knowledge Tree helps you build a personal knowledge base through interconnected notes. Each note becomes a node in your knowledge graph, with relationships that form meaningful connections between ideas and thoughts.
+
+## Tech Stack
+
+- **Frontend**: Next.js 15, React, TypeScript, TailwindCSS
+- **Visualization**: Sigma.js with Graphology
+- **Backend**: tRPC, Prisma ORM
+- **Database**: PostgreSQL
+- **Authentication**: NextAuth.js with credentials provider
 
 ## Getting Started
 
-First, run the development server:
+## Opened website
+
+Web: [knowledge tree site](https://kn-owl-edge-tree.vercel.app/)
+
+## Self hosting
+
+### Prerequisites
+
+- Node.js 18+
+- PostgreSQL database
+- npm or yarn
+
+### Installation
+
+1. Clone the repository
+
+```bash
+git clone https://github.com/Andebugulin/kn-owl-edge-tree.git
+cd kn-owl-edge-tree
+```
+
+2. Install dependencies
+
+```bash
+npm install
+```
+
+3. Set up environment variables
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your configuration:
+
+```env
+DATABASE_URL="postgresql://user:password@localhost:5432/knowledge_tree"
+NEXTAUTH_SECRET="your-secret-key"
+NEXTAUTH_URL="http://localhost:3000"
+```
+
+4. Initialize the database
+
+```bash
+npx prisma generate
+npx prisma db push
+```
+
+5. Run the development server
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Visit [http://localhost:3000](http://localhost:3000) to start building your knowledge tree.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Usage
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### Creating Nodes
 
-## Learn More
+- Click **New Node** in the top bar
+- Enter a title and optional content
+- Nodes support basic markdown formatting
 
-To learn more about Next.js, take a look at the following resources:
+### Connecting Ideas
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Select a node to enter **Edit Mode**
+2. Switch to **Link Mode**
+3. Choose relationship type:
+   - **Parent/Child** - Hierarchical connections (one parent per node)
+   - **Reference** - Related concepts
+   - **Example** - Concrete instances
+   - **Contradiction** - Conflicting ideas
+4. Click another node to create the connection
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Navigation
 
-## Deploy on Vercel
+- **Click** - Select and edit nodes
+- **Hover** - Preview node content
+- **Search** - Find nodes by title or content
+- **Drag** - Pan around the graph
+- **Scroll** - Zoom in/out
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Project Structure
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```
+├── app/                    # Next.js app directory
+│   ├── api/               # API routes (auth, tRPC)
+│   ├── dashboard/         # Main application
+│   └── (auth)/            # Authentication pages
+├── components/            # React components
+├── lib/                   # Utilities and configs
+├── prisma/               # Database schema
+├── server/               # tRPC routers and context
+└── generated-prisma/     # Generated Prisma client
+```
 
-# Going to write the README,a little bit later!
+## Database Schema
+
+**Node**
+
+- Stores individual knowledge units
+- Belongs to a user
+- Contains title and content
+
+**Edge**
+
+- Connects two nodes
+- Types: parent, reference, example, contradiction
+- Cascade deletes with nodes
+
+**User**
+
+- Authentication and ownership
+- Isolated knowledge graphs per user
+
+## Contributing
+
+Contributions are welcome!
+
+## License
+
+MIT License
+
+## Made with ❤️
+
+Claude AI was used to help with styling and some code snippets.
