@@ -9,7 +9,7 @@ import type { JSX } from "react";
 const GraphView = dynamic(() => import("@/components/GraphView"), {
   ssr: false,
   loading: () => (
-    <div className="w-full h-full flex items-center justify-center bg-[#0b0e14] text-[#6e7681]">
+    <div className="w-full h-full flex items-center justify-center bg-[var(--bg-primary)] text-[var(--text-faint)]">
       Loading…
     </div>
   ),
@@ -307,23 +307,23 @@ function renderFmt(t: string): {
 } {
   if (t.startsWith("### "))
     return {
-      className: "text-[#e6edf3] font-bold text-[13px]",
+      className: "text-[var(--text-primary)] font-bold text-[13px]",
       content: renderInl(t.slice(4)),
     };
   if (t.startsWith("## "))
     return {
-      className: "text-[#e6edf3] font-bold text-[15px]",
+      className: "text-[var(--text-primary)] font-bold text-[15px]",
       content: renderInl(t.slice(3)),
     };
   if (t.startsWith("# "))
     return {
-      className: "text-[#e6edf3] font-bold text-[17px]",
+      className: "text-[var(--text-primary)] font-bold text-[17px]",
       content: renderInl(t.slice(2)),
     };
   if (/^\s*[-*]\s/.test(t))
     return {
       content: [
-        <span key="b" className="text-[#6e7681]">
+        <span key="b" className="text-[var(--text-faint)]">
           {" "}
           •{" "}
         </span>,
@@ -343,19 +343,22 @@ function renderInl(t: string): (string | JSX.Element)[] {
     if (m.index > li) o.push(t.slice(li, m.index));
     if (m[1])
       o.push(
-        <span key={k++} className="text-[#e6edf3] font-bold">
+        <span key={k++} className="text-[var(--text-primary)] font-bold">
           {m[2]}
         </span>
       );
     else if (m[3])
       o.push(
-        <span key={k++} className="text-[#e6edf3] italic">
+        <span key={k++} className="text-[var(--text-primary)] italic">
           {m[4]}
         </span>
       );
     else if (m[5])
       o.push(
-        <code key={k++} className="bg-[#1c2030] text-[#f0883e] px-1 rounded">
+        <code
+          key={k++}
+          className="bg-[var(--code-bg)] text-[var(--code-text)] px-1 rounded"
+        >
           {m[6]}
         </code>
       );
@@ -363,7 +366,7 @@ function renderInl(t: string): (string | JSX.Element)[] {
       o.push(
         <span
           key={k++}
-          className="text-[#da3633] underline decoration-[#da3633]/30"
+          className="text-[var(--link-color)] underline decoration-[var(--link-color)]/30"
         >
           [[{m[8]}]]
         </span>
@@ -436,6 +439,17 @@ function buildDoc(t: string, c: string): string[] {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export default function Dashboard() {
   const { data: session } = useSession();
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window !== "undefined") {
+      return (localStorage.getItem("kt-theme") as "dark" | "light") || "dark";
+    }
+    return "dark";
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("kt-theme", theme);
+  }, [theme]);
   const [view, setView] = useState<"notes" | "graph">("notes");
   const [uiFocus, setUIFocus] = useState<UIFocus>("list");
   const [listIdx, setListIdx] = useState(0);
@@ -1135,6 +1149,10 @@ export default function Dashboard() {
   // ━━━ KEYBOARD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
+      // Allow Ctrl+V / Cmd+V to pass through to paste handler
+      if ((e.metaKey || e.ctrlKey) && e.key === "v") {
+        return; // handled by paste listener below
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
         saveDoc();
@@ -1947,8 +1965,45 @@ export default function Dashboard() {
         return;
       }
     };
+
+    const handlePaste = (e: ClipboardEvent) => {
+      if (vimMode !== "INSERT" || uiFocus !== "editor") return;
+      e.preventDefault();
+      const text = e.clipboardData?.getData("text/plain");
+      if (!text) return;
+      pushUndo();
+      const cur = cursorRef.current;
+      const cl = linesRef.current;
+      const pasteLines = text.split("\n");
+
+      setLines(() => {
+        const nl = [...cl];
+        const before = nl[cur.line].slice(0, cur.col);
+        const after = nl[cur.line].slice(cur.col);
+
+        if (pasteLines.length === 1) {
+          nl[cur.line] = before + pasteLines[0] + after;
+          setCursor({ line: cur.line, col: cur.col + pasteLines[0].length });
+        } else {
+          nl[cur.line] = before + pasteLines[0];
+          const middle = pasteLines.slice(1, -1);
+          const lastPaste = pasteLines[pasteLines.length - 1];
+          nl.splice(cur.line + 1, 0, ...middle, lastPaste + after);
+          setCursor({
+            line: cur.line + pasteLines.length - 1,
+            col: lastPaste.length,
+          });
+        }
+        return nl;
+      });
+    };
+
     window.addEventListener("keydown", handle);
-    return () => window.removeEventListener("keydown", handle);
+    window.addEventListener("paste", handlePaste);
+    return () => {
+      window.removeEventListener("keydown", handle);
+      window.removeEventListener("paste", handlePaste);
+    };
   }, [
     vimMode,
     uiFocus,
@@ -1984,8 +2039,10 @@ export default function Dashboard() {
   // ━━━ RENDER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   if (isLoading)
     return (
-      <div className="h-screen bg-[#0b0e14] flex items-center justify-center">
-        <span className="text-[#6e7681] font-mono text-sm">Loading…</span>
+      <div className="h-screen bg-[var(--bg-primary)] flex items-center justify-center">
+        <span className="text-[var(--text-faint)] font-mono text-sm">
+          Loading…
+        </span>
       </div>
     );
   const modeColor =
@@ -2006,12 +2063,12 @@ export default function Dashboard() {
         <div
           key={lineIdx}
           id={`ed-line-${lineIdx}`}
-          className="ed-line flex items-start bg-[#12151e]"
+          className="ed-line flex items-start bg-[var(--bg-editor-line)]"
         >
-          <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[#8b949e]">
+          <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-muted)]">
             {lineNum}
           </span>
-          <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[#c9d1d9]">
+          <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
             {chars.length === 0 ? (
               vimMode === "INSERT" ? (
                 <span className="ed-cursor-line" />
@@ -2036,7 +2093,10 @@ export default function Dashboard() {
                   );
                 if (isCur && vimMode === "VISUAL")
                   return (
-                    <span key={ci} className="bg-[#79c0ff] text-[#0b0e14]">
+                    <span
+                      key={ci}
+                      className="bg-[var(--blue)] text-[var(--bg-primary)]"
+                    >
                       {ch}
                     </span>
                   );
@@ -2067,10 +2127,10 @@ export default function Dashboard() {
             id={`ed-line-${lineIdx}`}
             className="ed-line flex items-start"
           >
-            <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[#6e7681]">
+            <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-faint)]">
               {relNum || lineNum}
             </span>
-            <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[#c9d1d9]">
+            <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
               {chars.length === 0 ? (
                 <span className="bg-[#79c0ff]/20 inline-block w-2 h-[22px]" />
               ) : (
@@ -2097,11 +2157,11 @@ export default function Dashboard() {
           lineText.trim() === "" ? "h-[22px]" : ""
         }`}
       >
-        <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[#6e7681]">
+        <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-faint)]">
           {relNum || lineNum}
         </span>
         <div
-          className={`flex-1 font-mono text-[14px] leading-[22px] text-[#c9d1d9] ${
+          className={`flex-1 font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] ${
             fmt.className || ""
           }`}
         >
@@ -2120,32 +2180,32 @@ export default function Dashboard() {
       {linkerFocus === section && (
         <span className="w-1.5 h-1.5 rounded-full bg-[#7ee787]" />
       )}
-      <span className="text-[11px] text-[#7d8590] font-mono uppercase tracking-wider">
+      <span className="text-[11px] text-[var(--text-dimmed)] font-mono uppercase tracking-wider">
         {label}
       </span>
     </div>
   );
 
   return (
-    <div className="h-screen flex flex-col bg-[#0b0e14] text-[#c9d1d9] overflow-hidden">
+    <div className="h-screen flex flex-col bg-[var(--bg-primary)] text-[var(--text-secondary)] overflow-hidden">
       {/* ━━ HEADER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      <header className="bg-[#0d1117] border-b border-[#21262d] flex-shrink-0 h-11 flex items-center px-4 gap-3">
+      <header className="bg-[var(--bg-secondary)] border-b border-[var(--border)] flex-shrink-0 h-11 flex items-center px-4 gap-3">
         {/* Left */}
         <div className="flex items-center gap-3 flex-shrink-0">
           <span className="text-[#8b5cf6] text-[16px]">◆</span>
-          <span className="text-[14px] font-semibold text-[#e6edf3] tracking-tight">
+          <span className="text-[14px] font-semibold text-[var(--text-primary)] tracking-tight">
             Knowledge Tree
           </span>
         </div>
 
         {/* View tabs */}
-        <div className="flex items-center bg-[#161b22] rounded-md border border-[#21262d] overflow-hidden flex-shrink-0">
+        <div className="flex items-center bg-[var(--bg-tertiary)] rounded-md border border-[var(--border)] overflow-hidden flex-shrink-0">
           <button
             onClick={() => setView("notes")}
             className={`px-3 py-1 text-[12px] font-medium transition-colors ${
               view === "notes"
-                ? "bg-[#21262d] text-[#e6edf3]"
-                : "text-[#7d8590] hover:text-[#c9d1d9]"
+                ? "bg-[var(--bg-active)] text-[var(--text-primary)]"
+                : "text-[var(--text-dimmed)] hover:text-[var(--text-secondary)]"
             }`}
           >
             <span className="mr-1.5">☰</span>Notes
@@ -2157,22 +2217,22 @@ export default function Dashboard() {
             }}
             className={`px-3 py-1 text-[12px] font-medium transition-colors ${
               view === "graph"
-                ? "bg-[#21262d] text-[#e6edf3]"
-                : "text-[#7d8590] hover:text-[#c9d1d9]"
+                ? "bg-[var(--bg-active)] text-[var(--text-primary)]"
+                : "text-[var(--text-dimmed)] hover:text-[var(--text-secondary)]"
             }`}
           >
             <span className="mr-1.5">◇</span>Graph
           </button>
         </div>
 
-        <span className="text-[11px] text-[#6e7681] font-mono flex-shrink-0">
+        <span className="text-[11px] text-[var(--text-faint)] font-mono flex-shrink-0">
           {nodes?.length || 0} nodes
         </span>
 
         {/* Spacer — always present */}
         <div className="flex-1 min-w-0 flex justify-center">
           {selectedNode && view === "notes" && (
-            <span className="text-[12px] text-[#8b949e] font-mono truncate max-w-[300px]">
+            <span className="text-[12px] text-[var(--text-muted)] font-mono truncate max-w-[300px]">
               {selectedNode.title}
             </span>
           )}
@@ -2181,18 +2241,27 @@ export default function Dashboard() {
         {/* Right — always anchored */}
         <div className="flex items-center gap-2.5 flex-shrink-0">
           <button
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            className="w-6 h-6 rounded-md flex items-center justify-center text-[12px] hover:bg-[var(--bg-tertiary)] border border-transparent hover:border-[var(--border)] transition-all font-mono"
+            style={{ color: "var(--text-dimmed)" }}
+            title="Toggle theme"
+          >
+            {theme === "dark" ? "☀" : "●"}
+          </button>
+          <button
             onClick={() => setShowHelp(true)}
-            className="w-6 h-6 rounded-md flex items-center justify-center text-[12px] text-[#7d8590] hover:text-[#c9d1d9] hover:bg-[#161b22] border border-transparent hover:border-[#21262d] transition-all font-mono font-bold"
+            className="w-6 h-6 rounded-md flex items-center justify-center text-[12px] text-[var(--text-dimmed)] hover:text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)] border border-transparent hover:border-[var(--border)] transition-all font-mono font-bold"
             title="Shortcuts (?)"
           >
             ?
           </button>
-          <span className="text-[11px] text-[#7d8590] font-mono hidden sm:inline">
+
+          <span className="text-[11px] text-[var(--text-dimmed)] font-mono hidden sm:inline">
             {session?.user?.email}
           </span>
           <button
             onClick={() => signOut({ callbackUrl: "/login" })}
-            className="text-[11px] text-[#7d8590] hover:text-[#c9d1d9] font-mono transition-colors"
+            className="text-[11px] text-[var(--text-dimmed)] hover:text-[var(--text-secondary)] font-mono transition-colors"
           >
             logout
           </button>
@@ -2201,7 +2270,7 @@ export default function Dashboard() {
 
       {/* Search */}
       {showSearch && (
-        <div className="bg-[#0d1117] border-b border-[#21262d] flex-shrink-0">
+        <div className="bg-[var(--bg-secondary)] border-b border-[var(--border)] flex-shrink-0">
           <div className="max-w-lg mx-auto px-4 py-2">
             <div className="relative">
               <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#79c0ff] text-[13px] font-mono">
@@ -2217,11 +2286,11 @@ export default function Dashboard() {
                 }}
                 placeholder="search…"
                 autoFocus
-                className="w-full pl-7 pr-3 py-1.5 bg-[#0b0e14] border border-[#30363d] rounded text-[13px] font-mono text-[#e6edf3] placeholder-[#7d8590] focus:border-[#79c0ff]/50 focus:outline-none"
+                className="w-full pl-7 pr-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-active)] rounded text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-dimmed)] focus:border-[#79c0ff]/50 focus:outline-none"
               />
             </div>
             {searchResults.length > 0 && (
-              <div className="mt-1 bg-[#0b0e14] border border-[#21262d] rounded overflow-hidden max-h-48 overflow-y-auto custom-scrollbar">
+              <div className="mt-1 bg-[var(--bg-primary)] border border-[var(--border)] rounded overflow-hidden max-h-48 overflow-y-auto custom-scrollbar">
                 {searchResults.map((n, i) => (
                   <button
                     key={n.id}
@@ -2234,8 +2303,8 @@ export default function Dashboard() {
                     }}
                     className={`w-full text-left px-3 py-1.5 text-[13px] font-mono flex items-center gap-2 ${
                       i === searchIdx
-                        ? "bg-[#21262d] text-[#e6edf3]"
-                        : "text-[#c9d1d9] hover:bg-[#161b22]"
+                        ? "bg-[var(--bg-active)] text-[var(--text-primary)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
                     }`}
                   >
                     <span
@@ -2259,28 +2328,30 @@ export default function Dashboard() {
             <div
               className={`${
                 selectedNodeId ? "w-[260px] min-w-[260px]" : "flex-1 max-w-lg"
-              } h-full border-r border-[#21262d] flex flex-col bg-[#0b0e14] relative`}
+              } h-full border-r border-[var(--border)] flex flex-col bg-[var(--bg-primary)] relative`}
             >
               {/* Focus indicator */}
               {uiFocus === "list" && (
                 <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#7ee787] z-10" />
               )}
-              <div className="flex-shrink-0 p-2 border-b border-[#21262d]">
+              <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
                 <button
                   onClick={() => {
                     setIsCreating(true);
                     setTimeout(() => newTitleRef.current?.focus(), 30);
                   }}
-                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-[#c9d1d9] rounded text-[11px] font-mono"
+                  className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 bg-[var(--bg-secondary)] hover:bg-[var(--bg-primary)] border border-[var(--border-active)] text-[var(--text-secondary)] rounded text-[11px] font-mono"
                 >
                   <span className="text-[#7ee787]">+</span>new
-                  <kbd className="text-[10px] text-[#7d8590] ml-1">n</kbd>
+                  <kbd className="text-[10px] text-[var(--text-dimmed)] ml-1">
+                    n
+                  </kbd>
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto custom-scrollbar">
                 {sortedNodes.length === 0 ? (
                   <div className="flex items-center justify-center h-full">
-                    <p className="text-[#7d8590] text-[12px] font-mono">
+                    <p className="text-[var(--text-dimmed)] text-[12px] font-mono">
                       press n to create first node
                     </p>
                   </div>
@@ -2299,10 +2370,10 @@ export default function Dashboard() {
                           }}
                           className={`px-3 py-2 cursor-pointer transition-all duration-75 border-l-[3px] ${
                             isActive
-                              ? "bg-[#161b22] border-l-[#8b5cf6]"
+                              ? "bg-[var(--bg-tertiary)] border-l-[#8b5cf6]"
                               : isCur
                               ? "bg-[#7ee787]/10 border-l-[#7ee787]"
-                              : "border-l-transparent hover:bg-[#161b22]/30"
+                              : "border-l-transparent hover:bg-[var(--bg-tertiary)]/30"
                           }`}
                         >
                           <div className="flex items-center gap-2">
@@ -2313,10 +2384,10 @@ export default function Dashboard() {
                             <span
                               className={`text-[12px] font-mono truncate ${
                                 isActive
-                                  ? "text-[#e6edf3]"
+                                  ? "text-[var(--text-primary)]"
                                   : isCur
-                                  ? "text-[#e6edf3]"
-                                  : "text-[#c9d1d9]"
+                                  ? "text-[var(--text-primary)]"
+                                  : "text-[var(--text-secondary)]"
                               }`}
                             >
                               {node.title}
@@ -2328,7 +2399,7 @@ export default function Dashboard() {
                             )}
                           </div>
                           {!selectedNodeId && node.content && (
-                            <p className="text-[11px] text-[#7d8590] mt-0.5 ml-[13px] truncate font-mono">
+                            <p className="text-[11px] text-[var(--text-dimmed)] mt-0.5 ml-[13px] truncate font-mono">
                               {node.content.slice(0, 80)}
                             </p>
                           )}
@@ -2342,7 +2413,7 @@ export default function Dashboard() {
 
             {/* Editor */}
             {selectedNodeId && selectedNode && (
-              <div className="flex-1 h-full flex flex-col overflow-hidden bg-[#0b0e14] relative">
+              <div className="flex-1 h-full flex flex-col overflow-hidden bg-[var(--bg-primary)] relative">
                 {/* Focus indicator */}
                 {uiFocus === "editor" && !showLinker && (
                   <div
@@ -2351,13 +2422,13 @@ export default function Dashboard() {
                   />
                 )}
                 {allConns.length > 0 && (
-                  <div className="flex-shrink-0 border-b border-[#21262d] px-3 py-1.5 flex flex-wrap gap-1.5 bg-[#0d1117]">
+                  <div className="flex-shrink-0 border-b border-[var(--border)] px-3 py-1.5 flex flex-wrap gap-1.5 bg-[var(--bg-secondary)]">
                     {allConns.map((c) => {
                       const tid = c.dir === "out" ? c.toNodeId : c.fromNodeId;
                       return (
                         <span
                           key={c.id}
-                          className="inline-flex items-center gap-1 bg-[#161b22] px-2 py-0.5 rounded text-[10px] font-mono border border-[#21262d] group"
+                          className="inline-flex items-center gap-1 bg-[var(--bg-tertiary)] px-2 py-0.5 rounded text-[10px] font-mono border border-[var(--border)] group"
                         >
                           <span
                             className="w-[4px] h-[4px] rounded-full"
@@ -2367,7 +2438,7 @@ export default function Dashboard() {
                             }}
                           />
                           <span
-                            className="text-[#c9d1d9] cursor-pointer hover:text-[#e6edf3]"
+                            className="text-[var(--text-secondary)] cursor-pointer hover:text-[var(--text-primary)]"
                             onClick={() => {
                               saveDoc();
                               selectNode(tid);
@@ -2378,7 +2449,7 @@ export default function Dashboard() {
                           </span>
                           <button
                             onClick={() => deleteEdge.mutate({ id: c.id })}
-                            className="text-[#7d8590] hover:text-[#f85149] opacity-0 group-hover:opacity-100"
+                            className="text-[var(--text-dimmed)] hover:text-[#f85149] opacity-0 group-hover:opacity-100"
                           >
                             ×
                           </button>
@@ -2400,7 +2471,7 @@ export default function Dashboard() {
                   </div>
                   {bracketSugs.length > 0 && vimMode === "INSERT" && (
                     <div
-                      className="fixed z-50 bg-[#161b22] border border-[#30363d] rounded shadow-2xl overflow-hidden max-w-[280px]"
+                      className="fixed z-50 bg-[var(--bg-tertiary)] border border-[var(--border-active)] rounded shadow-2xl overflow-hidden max-w-[280px]"
                       style={{
                         left: `${60 + cursor.col * 8.4}px`,
                         top: `${80 + (cursor.line + 1) * 22}px`,
@@ -2412,8 +2483,8 @@ export default function Dashboard() {
                           onClick={() => insertBracketLink(s)}
                           className={`w-full text-left px-3 py-1.5 text-[12px] font-mono ${
                             i === bracketIdx
-                              ? "bg-[#da3633]/15 text-[#e6edf3]"
-                              : "text-[#c9d1d9] hover:bg-[#21262d]"
+                              ? "bg-[#da3633]/15 text-[var(--text-primary)]"
+                              : "text-[var(--text-secondary)] hover:bg-[var(--bg-active)]"
                           }`}
                         >
                           {s.title}
@@ -2435,10 +2506,11 @@ export default function Dashboard() {
               isLinkMode={false}
               linkFromNodeId={null}
               onLinkTargetClick={() => {}}
+              theme={theme}
             />
             {hoverNode && (
               <div
-                className="fixed bg-[#161b22]/95 backdrop-blur border border-[#30363d] rounded-lg shadow-2xl p-3 w-[300px] pointer-events-none z-40"
+                className="fixed bg-[var(--bg-tertiary)]/95 backdrop-blur border border-[var(--border-active)] rounded-lg shadow-2xl p-3 w-[300px] pointer-events-none z-40"
                 style={{
                   left: `${Math.min(
                     hoverPos.x + 16,
@@ -2454,24 +2526,24 @@ export default function Dashboard() {
                   className="w-[6px] h-[6px] rounded-full inline-block mr-2"
                   style={{ backgroundColor: getNodeColor(hoverNode) }}
                 />
-                <span className="text-[13px] font-mono font-bold text-[#e6edf3]">
+                <span className="text-[13px] font-mono font-bold text-[var(--text-primary)]">
                   {hoverNode.title}
                 </span>
                 {hoverNode.content && (
-                  <p className="text-[11px] text-[#c9d1d9] font-mono line-clamp-3 mt-1">
+                  <p className="text-[11px] text-[var(--text-secondary)] font-mono line-clamp-3 mt-1">
                     {hoverNode.content}
                   </p>
                 )}
               </div>
             )}
-            <div className="absolute bottom-4 left-4 bg-[#0b0e14]/90 border border-[#21262d] rounded p-2.5 text-[11px] font-mono space-y-1">
+            <div className="absolute bottom-4 left-4 bg-[var(--bg-primary)]/90 border border-[var(--border)] rounded p-2.5 text-[11px] font-mono space-y-1">
               {Object.entries(EDGE_COLORS_BRIGHT).map(([t, c]) => (
                 <div key={t} className="flex items-center gap-2">
                   <span
                     className="w-4 h-0.5 rounded"
                     style={{ backgroundColor: c }}
                   />
-                  <span className="text-[#c9d1d9]">{t}</span>
+                  <span className="text-[var(--text-secondary)]">{t}</span>
                 </div>
               ))}
             </div>
@@ -2487,14 +2559,14 @@ export default function Dashboard() {
             if (e.target === e.currentTarget) setShowLinker(false);
           }}
         >
-          <div className="absolute inset-0 bg-[#010409]/70 backdrop-blur-[3px]" />
+          <div className="absolute inset-0 bg-[var(--bg-input)]/70 backdrop-blur-[3px]" />
 
           {/* ★ Floating tree — big, glassmorphism, prominent */}
           <div className="relative z-10 mb-4 w-full max-w-2xl">
-            <div className="bg-[#0d1117]/90 backdrop-blur-2xl border border-[#30363d]/40 rounded-2xl px-6 py-5 shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
+            <div className="bg-[var(--bg-secondary)]/90 backdrop-blur-2xl border border-[var(--border-active)]/40 rounded-2xl px-6 py-5 shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
               <div className="flex items-center gap-2 mb-3">
                 <span className="w-2 h-2 rounded-full bg-[#8b5cf6]" />
-                <span className="text-[12px] text-[#8b949e] font-mono uppercase tracking-widest">
+                <span className="text-[12px] text-[var(--text-muted)] font-mono uppercase tracking-widest">
                   Tree Preview
                 </span>
               </div>
@@ -2528,8 +2600,8 @@ export default function Dashboard() {
                             tl.isGhost
                               ? "px-2.5 py-1 rounded-md border border-dashed text-[13px]"
                               : tl.isCurrent
-                              ? "text-[#e6edf3] font-bold bg-[#010409] px-2.5 py-1 rounded-md ring-1 ring-[#8b5cf6]/40"
-                              : "text-[#e6edf3] py-1"
+                              ? "text-[var(--text-primary)] font-bold bg-[var(--bg-input)] px-2.5 py-1 rounded-md ring-1 ring-[#8b5cf6]/40"
+                              : "text-[var(--text-primary)] py-1"
                           }
                           style={
                             tl.isGhost
@@ -2554,7 +2626,7 @@ export default function Dashboard() {
                   })}
                 </div>
               ) : (
-                <p className="text-[14px] text-[#6e7681] font-mono">
+                <p className="text-[14px] text-[var(--text-faint)] font-mono">
                   Isolated node — no connections yet
                 </p>
               )}
@@ -2562,17 +2634,17 @@ export default function Dashboard() {
           </div>
 
           {/* ★ Main popup — cleaner, bigger text */}
-          <div className="relative z-10 bg-[#0d1117] border border-[#30363d]/60 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] w-full max-w-2xl max-h-[50vh] flex flex-col overflow-hidden">
+          <div className="relative z-10 bg-[var(--bg-secondary)] border border-[var(--border-active)]/60 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] w-full max-w-2xl max-h-[50vh] flex flex-col overflow-hidden">
             {/* Header */}
-            <div className="flex items-center justify-between px-5 py-3 border-b border-[#21262d]">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border)]">
               <div className="flex items-center gap-2.5">
                 <span className="text-[#8b5cf6] text-[15px]">◆</span>
-                <span className="text-[15px] font-mono font-bold text-[#e6edf3]">
+                <span className="text-[15px] font-mono font-bold text-[var(--text-primary)]">
                   {selectedNode.title}
                 </span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-[11px] text-[#6e7681] font-mono">
+                <span className="text-[11px] text-[var(--text-faint)] font-mono">
                   Esc close · ? help
                 </span>
               </div>
@@ -2582,8 +2654,8 @@ export default function Dashboard() {
               {/* Connections */}
               {allConns.length > 0 && (
                 <div
-                  className={`px-5 py-3 border-b border-[#21262d] transition-colors ${
-                    linkerFocus === "conns" ? "bg-[#030202]/60" : ""
+                  className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
+                    linkerFocus === "conns" ? "bg-[var(--bg-input)]/60" : ""
                   }`}
                 >
                   {sectionIndicator("conns", "Connections")}
@@ -2597,8 +2669,8 @@ export default function Dashboard() {
                           key={c.id}
                           className={`flex items-center gap-2.5 text-[13px] font-mono px-3 py-2 rounded-lg transition-all duration-75 ${
                             focused
-                              ? "bg-[#0d1117] ring-1 ring-[#f85149]/40"
-                              : "hover:bg-[#030202]/50"
+                              ? "bg-[var(--bg-secondary)] ring-1 ring-[#f85149]/40"
+                              : "hover:bg-[var(--bg-tertiary)]/50"
                           }`}
                         >
                           <span
@@ -2608,10 +2680,10 @@ export default function Dashboard() {
                                 EDGE_COLORS_BRIGHT[c.type] || "#7d8590",
                             }}
                           />
-                          <span className="text-[#8b949e] text-[12px] w-[60px] flex-shrink-0">
+                          <span className="text-[var(--text-muted)] text-[12px] w-[60px] flex-shrink-0">
                             {c.type}
                           </span>
-                          <span className="text-[#e6edf3] truncate flex-1">
+                          <span className="text-[var(--text-primary)] truncate flex-1">
                             {getNodeTitle(tid)}
                           </span>
                           {focused && (
@@ -2628,8 +2700,8 @@ export default function Dashboard() {
 
               {/* Type selector */}
               <div
-                className={`px-5 py-3 border-b border-[#21262d] transition-colors ${
-                  linkerFocus === "type" ? "bg-[#030202]/60" : ""
+                className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
+                  linkerFocus === "type" ? "bg-[var(--bg-input)]/60" : ""
                 }`}
               >
                 {sectionIndicator("type", "Link Type")}
@@ -2640,8 +2712,8 @@ export default function Dashboard() {
                       onClick={() => setLinkTypeIdx(idx)}
                       className={`flex-1 py-2.5 rounded-lg text-[13px] font-mono font-medium transition-all duration-75 flex flex-col items-center gap-1 border ${
                         linkTypeIdx === idx
-                          ? "text-[#e6edf3] font-bold"
-                          : "text-[#8b949e] hover:text-[#c9d1d9] bg-[#0b0e14] border-[#21262d]"
+                          ? "text-[var(--text-primary)] font-bold"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-primary)] border-[var(--border)]"
                       }`}
                       style={
                         linkTypeIdx === idx
@@ -2658,7 +2730,7 @@ export default function Dashboard() {
                   ))}
                 </div>
                 {linkerFocus === "type" && (
-                  <p className="text-[11px] text-[#8b949e] font-mono mt-2 text-center">
+                  <p className="text-[11px] text-[var(--text-muted)] font-mono mt-2 text-center">
                     ← h / l → change type · ↓ j candidates · ↑ k connections
                   </p>
                 )}
@@ -2668,14 +2740,14 @@ export default function Dashboard() {
               <div
                 className={`px-5 py-3 transition-colors ${
                   linkerFocus === "candidates" || linkerFocus === "filter"
-                    ? "bg-[#030202]/60"
+                    ? "bg-[var(--bg-input)]/60"
                     : ""
                 }`}
               >
                 {sectionIndicator("candidates", "Candidates")}
                 <div className="mb-2.5">
                   <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-[#8b949e] font-mono">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-[var(--text-muted)] font-mono">
                       f/
                     </span>
                     <input
@@ -2688,10 +2760,10 @@ export default function Dashboard() {
                       }}
                       onFocus={() => setLinkerFocus("filter")}
                       placeholder="filter nodes…"
-                      className={`w-full pl-8 pr-3 py-2 bg-[#010409] border rounded-lg text-[13px] font-mono text-[#e6edf3] placeholder-[#6e7681] focus:outline-none transition-colors ${
+                      className={`w-full pl-8 pr-3 py-2 bg-[var(--bg-input)] border rounded-lg text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none transition-colors ${
                         linkerFocus === "filter"
                           ? "border-[#8b5cf6]/50"
-                          : "border-[#21262d]"
+                          : "border-[var(--border)]"
                       }`}
                     />
                   </div>
@@ -2706,8 +2778,8 @@ export default function Dashboard() {
                         onClick={() => validateAndLink(c.id)}
                         className={`w-full text-left px-3 py-2.5 rounded-lg text-[13px] font-mono flex items-center gap-2.5 transition-all duration-75 ${
                           focused
-                            ? "bg-[#21262d] text-[#e6edf3] ring-1 ring-[#8b5cf6]/30"
-                            : "text-[#c9d1d9] hover:bg-[#030202]/50"
+                            ? "bg-[var(--bg-active)] text-[var(--text-primary)] ring-1 ring-[#8b5cf6]/30"
+                            : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50"
                         }`}
                       >
                         <span
@@ -2716,7 +2788,7 @@ export default function Dashboard() {
                         />
                         <span className="truncate flex-1">{c.title}</span>
                         {focused && (
-                          <span className="text-[11px] text-[#8b949e] flex-shrink-0">
+                          <span className="text-[11px] text-[var(--text-muted)] flex-shrink-0">
                             ⏎ link
                           </span>
                         )}
@@ -2724,7 +2796,7 @@ export default function Dashboard() {
                     );
                   })}
                   {linkCandidates.length === 0 && (
-                    <p className="text-[13px] text-[#6e7681] font-mono text-center py-5">
+                    <p className="text-[13px] text-[var(--text-faint)] font-mono text-center py-5">
                       {linkSearch ? "no matches" : "no candidates"}
                     </p>
                   )}
@@ -2737,9 +2809,9 @@ export default function Dashboard() {
 
       {/* ━━ CREATE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
       {isCreating && (
-        <div className="fixed inset-0 z-50 bg-[#0b0e14]/80 backdrop-blur-sm flex items-center justify-center">
-          <div className="bg-[#0d1117] border border-[#21262d] rounded-lg shadow-2xl w-full max-w-sm p-4 space-y-3">
-            <h2 className="text-[14px] font-mono font-bold text-[#e6edf3]">
+        <div className="fixed inset-0 z-50 bg-[var(--bg-primary)]/80 backdrop-blur-sm flex items-center justify-center">
+          <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg shadow-2xl w-full max-w-sm p-4 space-y-3">
+            <h2 className="text-[14px] font-mono font-bold text-[var(--text-primary)]">
               New node
             </h2>
             <input
@@ -2757,7 +2829,7 @@ export default function Dashboard() {
               }}
               placeholder="title"
               autoFocus
-              className="w-full px-3 py-2 bg-[#0b0e14] border border-[#30363d] rounded text-[14px] font-mono text-[#e6edf3] placeholder-[#6e7681] focus:border-[#8b5cf6]/40 focus:outline-none"
+              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-active)] rounded text-[14px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:border-[#8b5cf6]/40 focus:outline-none"
             />
             <div className="flex gap-2">
               <button
@@ -2775,7 +2847,7 @@ export default function Dashboard() {
                   setIsCreating(false);
                   setNewTitle("");
                 }}
-                className="px-3 py-1.5 bg-[#21262d] hover:bg-[#30363d] text-[#c9d1d9] rounded text-[12px] font-mono"
+                className="px-3 py-1.5 bg-[var(--bg-active)] hover:bg-[var(--border-active)] text-[var(--text-secondary)] rounded text-[12px] font-mono"
               >
                 cancel
               </button>
@@ -2787,19 +2859,19 @@ export default function Dashboard() {
       {/* ━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
       {showHelp && (
         <div
-          className="fixed inset-0 z-50 bg-[#0b0e14]/80 backdrop-blur-sm flex items-center justify-center"
+          className="fixed inset-0 z-50 bg-[var(--bg-primary)]/80 backdrop-blur-sm flex items-center justify-center"
           onClick={(e) => {
             if (e.target === e.currentTarget) setShowHelp(false);
           }}
         >
-          <div className="bg-[#0d1117] border border-[#21262d] rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-3 border-b border-[#21262d]">
-              <span className="text-[15px] font-mono font-bold text-[#e6edf3]">
+          <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border)]">
+              <span className="text-[15px] font-mono font-bold text-[var(--text-primary)]">
                 Keyboard Shortcuts
               </span>
               <button
                 onClick={() => setShowHelp(false)}
-                className="text-[#7d8590] hover:text-[#e6edf3] text-[16px] transition-colors"
+                className="text-[var(--text-dimmed)] hover:text-[var(--text-primary)] text-[16px] transition-colors"
               >
                 ✕
               </button>
@@ -2814,10 +2886,10 @@ export default function Dashboard() {
                     <div className="space-y-1.5">
                       {sec.items.map(([key, desc]) => (
                         <div key={key} className="flex items-baseline gap-3">
-                          <kbd className="text-[11px] font-mono text-[#e6edf3] bg-[#161b22] border border-[#30363d] px-1.5 py-0.5 rounded min-w-[60px] text-center flex-shrink-0">
+                          <kbd className="text-[11px] font-mono text-[var(--text-primary)] bg-[var(--bg-tertiary)] border border-[var(--border-active)] px-1.5 py-0.5 rounded min-w-[60px] text-center flex-shrink-0">
                             {key}
                           </kbd>
-                          <span className="text-[12px] text-[#c9d1d9] font-mono">
+                          <span className="text-[12px] text-[var(--text-secondary)] font-mono">
                             {desc}
                           </span>
                         </div>
@@ -2826,7 +2898,7 @@ export default function Dashboard() {
                   </div>
                 ))}
               </div>
-              <p className="text-[11px] text-[#6e7681] font-mono mt-6 text-center">
+              <p className="text-[11px] text-[var(--text-faint)] font-mono mt-6 text-center">
                 Press ? or Esc to close
               </p>
             </div>
@@ -2835,7 +2907,7 @@ export default function Dashboard() {
       )}
 
       {/* ━━ STATUS BAR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
-      <div className="h-[32px] bg-[#0d1117] border-t border-[#21262d] flex-shrink-0 flex items-center px-4 gap-3">
+      <div className="h-[32px] bg-[var(--bg-secondary)] border-t border-[var(--border)] flex-shrink-0 flex items-center px-4 gap-3">
         <span
           className="font-bold px-2 py-0.5 rounded text-[11px] font-mono"
           style={{
@@ -2845,8 +2917,8 @@ export default function Dashboard() {
         >
           {showLinker ? "LINK" : vimMode}
         </span>
-        <span className="text-[#21262d]">│</span>
-        <span className="text-[12px] text-[#8b949e] font-mono flex-1">
+        <span className="text-[var(--border)]">│</span>
+        <span className="text-[12px] text-[var(--text-muted)] font-mono flex-1">
           {showLinker &&
             linkerFocus === "filter" &&
             "Type to filter · Esc → back · Enter → candidates"}
@@ -2883,13 +2955,13 @@ export default function Dashboard() {
           </span>
         )}
         {!statusMsg && uiFocus === "editor" && !showLinker && (
-          <span className="text-[12px] text-[#6e7681] font-mono">
+          <span className="text-[12px] text-[var(--text-faint)] font-mono">
             {cursor.line + 1}:{cursor.col + 1}
           </span>
         )}
         <button
           onClick={() => setShowHelp(true)}
-          className="text-[12px] text-[#6e7681] hover:text-[#c9d1d9] font-mono font-bold transition-colors"
+          className="text-[12px] text-[var(--text-faint)] hover:text-[var(--text-secondary)] font-mono font-bold transition-colors"
           title="Shortcuts (?)"
         >
           ?

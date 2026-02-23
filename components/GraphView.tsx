@@ -39,6 +39,7 @@ type GraphViewProps = {
   isLinkMode?: boolean;
   linkFromNodeId?: string | null;
   onLinkTargetClick?: (targetNodeId: string) => void;
+  theme?: "dark" | "light";
 };
 
 export default function GraphView({
@@ -49,6 +50,7 @@ export default function GraphView({
   isLinkMode = false,
   linkFromNodeId = null,
   onLinkTargetClick,
+  theme = "dark",
 }: GraphViewProps) {
   const [selectedTarget, setSelectedTarget] = useState<string | null>(null);
 
@@ -74,7 +76,7 @@ export default function GraphView({
       renderEdgeLabels: false,
       defaultNodeColor: "#5D0E41",
       defaultEdgeColor: "#00224D",
-      labelColor: { color: "#E5E7EB" },
+      labelColor: { color: theme === "dark" ? "#E5E7EB" : "#1a1c20" },
       labelSize: 15,
       labelWeight: "400",
       labelFont: "Inter, system-ui, sans-serif",
@@ -100,6 +102,16 @@ export default function GraphView({
 
     return () => {};
   }, []);
+
+  // Update Sigma label color when theme changes
+  useEffect(() => {
+    const sigma = sigmaRef.current;
+    if (!sigma) return;
+    sigma.setSetting("labelColor", {
+      color: theme === "dark" ? "#E5E7EB" : "#1a1c20",
+    });
+    sigma.refresh();
+  }, [theme]);
 
   const currentStateRef = useRef({ isLinkMode, linkFromNodeId });
   useEffect(() => {
@@ -487,11 +499,11 @@ export default function GraphView({
 
       // Override for selection states
       if (isLinkMode && node.id === linkFromNodeId) {
-        color = "#FFFFFF"; // Pure white
+        color = theme === "dark" ? "#FFFFFF" : "#1a1c20";
       } else if (isLinkMode && node.id === selectedTarget) {
-        color = "#FFD700"; // Bright gold
+        color = "#FFD700";
       } else if (!isLinkMode && node.id === linkFromNodeId) {
-        color = "#FFFFFF"; // Pure white
+        color = theme === "dark" ? "#FFFFFF" : "#1a1c20";
       }
 
       const isSpecialNode = specialNodes.has(node.id);
@@ -606,7 +618,7 @@ export default function GraphView({
         }
       }
     }, 100);
-  }, [nodes, isLinkMode, linkFromNodeId, selectedTarget]);
+  }, [nodes, isLinkMode, linkFromNodeId, selectedTarget, theme]);
 
   useEffect(() => {
     return () => {
@@ -624,8 +636,11 @@ export default function GraphView({
 
   if (nodes.length === 0) {
     return (
-      <div className="w-full h-full bg-[#0A0A0F] flex items-center justify-center">
-        <p className="text-gray-400 text-base">
+      <div
+        className="w-full h-full flex items-center justify-center"
+        style={{ backgroundColor: "var(--bg-primary)" }}
+      >
+        <p style={{ color: "var(--text-dimmed)" }} className="text-base">
           No nodes yet. Click the &ldquo;New Node&rdquo; button in the top bar
           to create your first node.
         </p>
@@ -634,9 +649,21 @@ export default function GraphView({
   }
 
   return (
-    <div ref={containerRef} className="w-full h-full bg-[#0A0A0F]">
+    <div
+      ref={containerRef}
+      className="w-full h-full"
+      style={{ backgroundColor: "var(--bg-primary)" }}
+    >
       {isLinkMode && (
-        <div className="absolute top-6 left-1/2 transform -translate-x-1/2 bg-[#12121A]/95 backdrop-blur-md border border-[#FFD700] rounded-lg px-6 py-3 z-40 shadow-2xl">
+        <div
+          className="absolute top-6 left-1/2 transform -translate-x-1/2 backdrop-blur-md border border-[#FFD700] rounded-lg px-6 py-3 z-40 shadow-2xl"
+          style={{
+            backgroundColor:
+              theme === "dark"
+                ? "rgba(18,18,26,0.95)"
+                : "rgba(236,237,240,0.95)",
+          }}
+        >
           <p className="text-sm text-[#FFD700] font-medium">
             Link Mode Active • Click a node to create connection
           </p>
