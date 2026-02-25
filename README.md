@@ -8,7 +8,7 @@ I would like to have simple ui/web tool, where i would manage my knowledge as a 
 
 ## Overview
 
-Knowledge Tree helps you build a personal knowledge base through interconnected notes. Each note becomes a node in your knowledge graph, with relationships that form meaningful connections between ideas and thoughts.
+Knowledge Tree lets you build a personal knowledge base through interconnected notes. Each note is a node; relationships between them form a graph you can navigate, search, and explore — fully controllable via Vim keybindings.
 
 ## Tech Stack
 
@@ -18,42 +18,28 @@ Knowledge Tree helps you build a personal knowledge base through interconnected 
 - **Database**: PostgreSQL
 - **Authentication**: NextAuth.js with credentials provider
 
-## Getting Started
+## Live
 
-## Opened website
+[kn-owl-edge-tree.vercel.app](https://kn-owl-edge-tree.vercel.app/)
 
-Web: [knowledge tree site](https://kn-owl-edge-tree.vercel.app/)
-
-## Self hosting
+## Self Hosting
 
 ### Prerequisites
 
 - Node.js 18+
 - PostgreSQL database
-- npm or yarn
+- npm
 
 ### Installation
-
-1. Clone the repository
 
 ```bash
 git clone https://github.com/Andebugulin/kn-owl-edge-tree.git
 cd kn-owl-edge-tree
-```
-
-2. Install dependencies
-
-```bash
 npm install
-```
-
-3. Set up environment variables
-
-```bash
 cp .env.example .env
 ```
 
-Edit `.env` with your configuration:
+Edit `.env`:
 
 ```env
 DATABASE_URL="postgresql://user:password@localhost:5432/knowledge_tree"
@@ -61,89 +47,165 @@ NEXTAUTH_SECRET="your-secret-key"
 NEXTAUTH_URL="http://localhost:3000"
 ```
 
-4. Initialize the database
-
 ```bash
 npx prisma generate
 npx prisma db push
-```
-
-5. Run the development server
-
-```bash
 npm run dev
 ```
 
-Visit [http://localhost:3000](http://localhost:3000) to start building your knowledge tree.
+Visit [http://localhost:3000](http://localhost:3000).
+
+---
 
 ## Usage
 
-### Creating Nodes
+### Theme
 
-- Click **New Node** in the top bar
-- Enter a title and optional content
-- Nodes support basic markdown formatting
+Toggle between **dark** and **light** mode via the theme button in the top bar. Preference is persisted in `localStorage`.
 
-### Connecting Ideas
+---
 
-1. Select a node to enter **Edit Mode**
-2. Switch to **Link Mode**
-3. Choose relationship type:
-   - **Parent/Child** - Hierarchical connections (one parent per node)
-   - **Reference** - Related concepts
-   - **Example** - Concrete instances
-   - **Contradiction** - Conflicting ideas
-4. Click another node to create the connection
+### Vim Keybindings
 
-### Navigation
+The entire dashboard is keyboard-driven. Press `?` anywhere to open the in-app reference. There are three vim modes — **NORMAL**, **INSERT**, **VISUAL** — plus two UI contexts: **list** (node list) and **editor** (open note).
 
-- **Click** - Select and edit nodes
-- **Hover** - Preview node content
-- **Search** - Find nodes by title or content
-- **Drag** - Pan around the graph
-- **Scroll** - Zoom in/out
+#### Node List
+
+| Key            | Action                                   |
+| -------------- | ---------------------------------------- |
+| `j` / `k`      | Move down / up the list                  |
+| `l` or `Enter` | Open selected node in editor             |
+| `n`            | Create new node                          |
+| `dd`           | Delete selected node (with confirmation) |
+| `/`            | Search nodes by title or content         |
+| `g` or `Tab`   | Toggle graph view                        |
+| `?`            | Open keybinding help                     |
+
+#### Editor — Normal Mode
+
+| Key                   | Action                                                  |
+| --------------------- | ------------------------------------------------------- |
+| `h` / `l` / `j` / `k` | Move cursor left / right / down / up                    |
+| `w` / `b` / `e`       | Next word / prev word / end of word                     |
+| `0` / `$` / `^`       | Line start / end / first non-blank                      |
+| `gg` / `G`            | Document top / bottom                                   |
+| `f{c}` / `F{c}`       | Find char forward / backward on line                    |
+| `i` / `a` / `A` / `I` | Insert before / after cursor / end of line / line start |
+| `o` / `O`             | New line below / above, enter INSERT                    |
+| `x`                   | Delete char under cursor                                |
+| `r{c}`                | Replace char under cursor                               |
+| `~`                   | Toggle case of char under cursor                        |
+| `J`                   | Join line below onto current                            |
+| `dd`                  | Delete (yank) line                                      |
+| `D`                   | Delete to end of line                                   |
+| `dw` / `de`           | Delete word                                             |
+| `di"` `di(` `di[`     | Delete inside pair                                      |
+| `yy`                  | Yank line                                               |
+| `p` / `P`             | Paste after / before cursor                             |
+| `cc` / `cw` / `C`     | Change line / word / to end of line                     |
+| `ci"` `ci(` `ci[`     | Change inside pair                                      |
+| `u` / `Ctrl+R`        | Undo / redo (50-level history)                          |
+| `v`                   | Enter VISUAL mode                                       |
+| `Space`               | Open link panel                                         |
+| `q`                   | Save and return to list                                 |
+| `n`                   | Save current note, create new node                      |
+| `/`                   | Search nodes                                            |
+| `g` / `Tab`           | Toggle graph view (single `g` with 350ms timeout)       |
+| `Ctrl+S`              | Save current note                                       |
+| `?`                   | Open keybinding help                                    |
+
+#### Editor — Insert Mode
+
+| Key                                | Action                                      |
+| ---------------------------------- | ------------------------------------------- |
+| `Esc`                              | Return to NORMAL, clamp cursor              |
+| Arrow keys                         | Move cursor                                 |
+| `Backspace` / `Delete`             | Delete char / forward-delete (merges lines) |
+| `Enter`                            | Split line                                  |
+| `Tab`                              | Insert two spaces                           |
+| `[[`                               | Trigger wiki-link autocomplete              |
+| `Tab` or `Enter` (in autocomplete) | Accept suggestion                           |
+| `Ctrl+V` / `Cmd+V`                 | Paste from clipboard (multi-line aware)     |
+
+#### Editor — Visual Mode
+
+| Key                               | Action                            |
+| --------------------------------- | --------------------------------- |
+| `h` / `l` / `j` / `k` / `w` / `b` | Extend selection                  |
+| `d` / `x`                         | Delete selection                  |
+| `y`                               | Yank selection                    |
+| `c`                               | Delete selection and enter INSERT |
+| `Esc`                             | Cancel selection                  |
+
+#### Link Panel (`Space`)
+
+| Key                     | Action                                                                 |
+| ----------------------- | ---------------------------------------------------------------------- |
+| `h` / `l`               | Cycle link type (child · parent · reference · example · contradiction) |
+| `j` / `k`               | Navigate vertically between sections                                   |
+| `f` or `/`              | Focus the filter input                                                 |
+| `Enter` or `Space`      | Create link to highlighted candidate                                   |
+| `d` or `x`              | Delete existing connection                                             |
+| `Enter` (on connection) | Jump to that node                                                      |
+| `Esc`                   | Close panel                                                            |
+
+#### Link Types & Rules
+
+| Type            | Direction                      | Constraint                         |
+| --------------- | ------------------------------ | ---------------------------------- |
+| `parent`        | current node → parent          | one parent per node; no cycles     |
+| `child`         | current node → child of target | child gains this node as parent    |
+| `reference`     | bidirectional                  | at least one node must be isolated |
+| `example`       | bidirectional                  | at least one node must be isolated |
+| `contradiction` | bidirectional                  | at least one node must be isolated |
+
+#### Wiki-links
+
+Type `[[` in INSERT mode to trigger autocomplete against existing node titles. Selecting a suggestion inserts a `[[Node Title]]` link inline.
+
+---
+
+### Mouse (Graph View)
+
+- **Click** — select node, jump to editor
+- **Double-click** (empty space) — create node at position
+- **Hover** — preview node content
+- **Drag** — pan
+- **Scroll** — zoom
+
+---
 
 ## Project Structure
 
 ```
-├── app/                    # Next.js app directory
-│   ├── api/               # API routes (auth, tRPC)
-│   ├── dashboard/         # Main application
-│   └── (auth)/            # Authentication pages
-├── components/            # React components
+├── app/
+│   ├── api/               # Auth & tRPC routes
+│   ├── dashboard/         # Main application (page.tsx)
+│   └── (auth)/            # Login / register
+├── components/
+│   └── GraphView.tsx      # Sigma.js graph renderer
 ├── lib/                   # Utilities and configs
-├── prisma/               # Database schema
-├── server/               # tRPC routers and context
-└── generated-prisma/     # Generated Prisma client
+├── prisma/                # Database schema
+├── server/                # tRPC routers
+└── generated-prisma/      # Generated Prisma client
 ```
 
 ## Database Schema
 
-**Node**
+**Node** — individual knowledge unit (title, content, owner)
 
-- Stores individual knowledge units
-- Belongs to a user
-- Contains title and content
+**Edge** — typed connection between two nodes (`parent`, `reference`, `example`, `contradiction`)
 
-**Edge**
-
-- Connects two nodes
-- Types: parent, reference, example, contradiction
-- Cascade deletes with nodes
-
-**User**
-
-- Authentication and ownership
-- Isolated knowledge graphs per user
+**User** — authentication and graph ownership; each user has an isolated knowledge graph
 
 ## Contributing
 
-Contributions are welcome!
+Contributions are welcome.
 
 ## License
 
-MIT License
+MIT
 
-## Made with ❤️
+---
 
-Claude AI was used to help with styling and some code snippets.
+Made by [Andrei Gulin](https://github.com/Andebugulin). Claude AI assisted with styling and code.
