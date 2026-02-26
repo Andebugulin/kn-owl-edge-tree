@@ -4,7 +4,87 @@ import { trpc } from "@/lib/trpc";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { signOut, useSession } from "next-auth/react";
 import dynamic from "next/dynamic";
-import type { JSX } from "react";
+
+import type {
+  Node,
+  VimMode,
+  UIFocus,
+  LinkerFocus,
+  Pos,
+  DocSnapshot,
+  VimCtx,
+} from "@/lib/editor/types";
+import {
+  LINK_TYPES,
+  EDGE_COLORS_BRIGHT,
+  HELP_SECTIONS,
+} from "@/lib/editor/constants";
+import {
+  getNodeColor,
+  wouldCreateCircle,
+  clampCol,
+  posMin,
+  posMax,
+  nextWord,
+  endOfWord,
+  prevWord,
+  nextWORD,
+  endOfWORD,
+  prevWORD,
+  findChar,
+  findMatchingBracket,
+  findMatchingPair,
+  prevParagraph,
+  nextParagraph,
+  getBracketCtx,
+  buildDoc,
+  extractDoc,
+} from "@/lib/editor/helpers";
+import { renderFmt } from "@/lib/editor/markdownRenderer";
+import { buildTreeWithPreview } from "@/lib/editor/treeBuilder";
+import {
+  insertChar,
+  deleteLine,
+  deleteToEOL,
+  changeLine,
+  deleteWord,
+  changeWord,
+  joinLines,
+  replaceChar,
+  toggleCase,
+  substituteChar,
+  deleteInsidePair,
+  changeInsidePair,
+  deleteAroundPair,
+  changeAroundPair,
+  yankInsidePair,
+  deleteInnerWord,
+  deleteAWord,
+  changeInnerWord,
+  changeAWord,
+  yankInnerWord,
+  yankAWord,
+  indentLine,
+  outdentLine,
+  indentLines,
+  outdentLines,
+  deleteSelection,
+  yankSelection,
+  deleteLineSelection,
+  yankLineSelection,
+  changeLineSelection,
+  pasteAfter,
+  pasteBefore,
+  isSelected,
+  isLineSelected,
+  deleteNLines,
+  yankNLines,
+  changeNLines,
+  deleteNWords,
+  changeNWords,
+  deleteNChars,
+  selectAll,
+} from "@/lib/editor/vimActions";
 
 const GraphView = dynamic(() => import("@/components/GraphView"), {
   ssr: false,
@@ -15,441 +95,19 @@ const GraphView = dynamic(() => import("@/components/GraphView"), {
   ),
 });
 
-// ━━━ Types ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-type Node = {
-  id: string;
-  title: string;
-  content: string;
-  userId: string;
-  importanceScore: number;
-  createdAt: Date;
-  updatedAt: Date;
-  edgesFrom: Array<{
-    id: string;
-    type: string;
-    fromNodeId: string;
-    toNodeId: string;
-    weight: number;
-  }>;
-  edgesTo: Array<{
-    id: string;
-    type: string;
-    fromNodeId: string;
-    toNodeId: string;
-    weight: number;
-  }>;
-};
-type VimMode = "NORMAL" | "INSERT" | "VISUAL";
-type UIFocus = "list" | "editor";
-type LinkType = "parent" | "child" | "reference" | "example" | "contradiction";
-type LinkerFocus = "conns" | "type" | "candidates" | "filter";
-type Pos = { line: number; col: number };
-type DocSnapshot = { lines: string[]; cursor: Pos };
-
-// ━━━ Constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const LINK_TYPES: {
-  type: LinkType;
-  label: string;
-  color: string;
-  icon: string;
-}[] = [
-  { type: "child", label: "Child", color: "#bf4070", icon: "↓" },
-  { type: "parent", label: "Parent", color: "#bf4070", icon: "↑" },
-  { type: "reference", label: "Reference", color: "#3d8b55", icon: "↔" },
-  { type: "example", label: "Example", color: "#3d7a9e", icon: "◇" },
-  {
-    type: "contradiction",
-    label: "Contradiction",
-    color: "#9e7a22",
-    icon: "⊥",
-  },
-];
-const EDGE_COLORS: Record<string, string> = {
-  parent: "#bf4070",
-  reference: "#3d8b55",
-  example: "#3d7a9e",
-  contradiction: "#9e7a22",
-};
-const EDGE_COLORS_BRIGHT: Record<string, string> = {
-  parent: "#FF6B9D",
-  reference: "#7ee787",
-  example: "#79c0ff",
-  contradiction: "#d29922",
-};
-
-// ━━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function getNodeColor(n: Node): string {
-  const sp = n.edgesTo.find((e) =>
-    ["reference", "example", "contradiction"].includes(e.type)
-  );
-  if (sp)
-    return sp.type === "example"
-      ? "#3d7a9e"
-      : sp.type === "contradiction"
-      ? "#9e7a22"
-      : "#3d8b55";
-  const c =
-    n.edgesFrom.filter(
-      (e) => !["reference", "example", "contradiction"].includes(e.type)
-    ).length +
-    n.edgesTo.filter(
-      (e) => !["reference", "example", "contradiction"].includes(e.type)
-    ).length;
-  return c > 5 ? "#da3633" : c > 2 ? "#a33030" : "#8b5cf6";
-}
-function wouldCreateCircle(
-  fromId: string,
-  toId: string,
-  nodes: Node[]
-): boolean {
-  const vis = new Set<string>();
-  const go = (id: string): boolean => {
-    if (vis.has(id)) return false;
-    if (id === fromId) return true;
-    vis.add(id);
-    const n = nodes.find((x) => x.id === id);
-    if (n)
-      for (const e of n.edgesTo)
-        if (e.type === "parent" && go(e.fromNodeId)) return true;
-    return false;
-  };
-  return go(toId);
-}
-function nextWord(l: string, c: number): number {
-  let i = c;
-  if (i < l.length && /\w/.test(l[i]))
-    while (i < l.length && /\w/.test(l[i])) i++;
-  else while (i < l.length && !/\w/.test(l[i]) && l[i] !== " ") i++;
-  while (i < l.length && /\s/.test(l[i])) i++;
-  return Math.min(i, l.length);
-}
-function endOfWord(l: string, c: number): number {
-  let i = c + 1;
-  while (i < l.length && /\s/.test(l[i])) i++;
-  while (i < l.length && /\w/.test(l[i])) i++;
-  return Math.min(Math.max(i - 1, c), l.length - 1);
-}
-function prevWord(l: string, c: number): number {
-  let i = c - 1;
-  while (i > 0 && /\s/.test(l[i])) i--;
-  while (i > 0 && /\w/.test(l[i - 1])) i--;
-  return Math.max(0, i);
-}
-function findChar(l: string, c: number, ch: string, fwd: boolean): number {
-  if (fwd) {
-    const i = l.indexOf(ch, c + 1);
-    return i >= 0 ? i : c;
-  } else {
-    const i = l.lastIndexOf(ch, c - 1);
-    return i >= 0 ? i : c;
-  }
-}
-function clampCol(ls: string[], ln: number, c: number, ins: boolean): number {
-  const len = ls[ln]?.length ?? 0;
-  return ins ? Math.min(c, len) : Math.min(c, Math.max(0, len - 1));
-}
-function posMin(a: Pos, b: Pos): Pos {
-  return a.line < b.line || (a.line === b.line && a.col <= b.col) ? a : b;
-}
-function posMax(a: Pos, b: Pos): Pos {
-  return a.line > b.line || (a.line === b.line && a.col >= b.col) ? a : b;
-}
-function findMatchingPair(
-  l: string,
-  c: number,
-  o: string,
-  cl: string
-): [number, number] | null {
-  let s = c,
-    e = c;
-  while (s >= 0 && l[s] !== o) s--;
-  while (e < l.length && l[e] !== cl) e++;
-  return s >= 0 && e < l.length ? [s, e] : null;
-}
-function getBracketCtx(
-  t: string,
-  c: number
-): { query: string; start: number } | null {
-  const b = t.slice(0, c);
-  const i = b.lastIndexOf("[[");
-  if (i === -1 || b.slice(i + 2).includes("]]")) return null;
-  return { query: b.slice(i + 2), start: i };
-}
-
-// ━━━ Tree builder with ghost ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-type TreeLine = {
-  indent: number;
-  label: string;
-  nodeId: string;
-  isCurrent: boolean;
-  connector: string;
-  edgeType?: string;
-  isGhost?: boolean;
-  ghostEdgeType?: string;
-};
-
-function buildTreeWithPreview(
-  nodeId: string,
-  nodes: Node[],
-  gt: (id: string) => string,
-  preview?: { targetId: string; targetTitle: string; linkType: LinkType }
-): TreeLine[] {
-  const r: TreeLine[] = [];
-  const node = nodes.find((n) => n.id === nodeId);
-  if (!node) return r;
-  function findRoot(id: string, v: Set<string>): string {
-    if (v.has(id)) return id;
-    v.add(id);
-    const n = nodes.find((x) => x.id === id);
-    if (!n) return id;
-    const pe = n.edgesTo.find((e) => e.type === "parent");
-    return pe ? findRoot(pe.fromNodeId, v) : id;
-  }
-  const rootId = findRoot(nodeId, new Set());
-  if (
-    preview?.linkType === "parent" &&
-    !node.edgesTo.some((e) => e.type === "parent")
-  ) {
-    r.push({
-      indent: 0,
-      label: preview.targetTitle,
-      nodeId: preview.targetId,
-      isCurrent: false,
-      connector: "◆",
-      isGhost: true,
-      ghostEdgeType: "parent",
-    });
-    _trav(nodeId, 1, true, new Set(), r, nodeId, undefined, gt, nodes);
-    return r;
-  }
-  _trav(rootId, 0, true, new Set(), r, nodeId, preview, gt, nodes);
-  return r;
-}
-function _trav(
-  id: string,
-  d: number,
-  isLast: boolean,
-  vis: Set<string>,
-  r: TreeLine[],
-  cur: string,
-  pv: { targetId: string; targetTitle: string; linkType: LinkType } | undefined,
-  gt: (id: string) => string,
-  nodes: Node[]
-) {
-  if (vis.has(id)) return;
-  vis.add(id);
-  const n = nodes.find((x) => x.id === id);
-  if (!n) return;
-  r.push({
-    indent: d,
-    label: gt(id),
-    nodeId: id,
-    isCurrent: id === cur,
-    connector: d === 0 ? "◆" : isLast ? "└─" : "├─",
-  });
-  const ch = n.edgesFrom
-    .filter((e) => e.type === "parent")
-    .map((e) => e.toNodeId);
-  const sp = n.edgesFrom.filter((e) => e.type !== "parent");
-  const gh: TreeLine[] = [];
-  if (id === cur && pv) {
-    if (pv.linkType === "child")
-      gh.push({
-        indent: d + 1,
-        label: pv.targetTitle,
-        nodeId: pv.targetId,
-        isCurrent: false,
-        connector: "└─",
-        isGhost: true,
-        ghostEdgeType: "parent",
-      });
-    else if (["reference", "example", "contradiction"].includes(pv.linkType))
-      gh.push({
-        indent: d + 1,
-        label: pv.targetTitle,
-        nodeId: pv.targetId,
-        isCurrent: false,
-        connector: "└╌",
-        isGhost: true,
-        ghostEdgeType: pv.linkType,
-        edgeType: pv.linkType,
-      });
-  }
-  const tot = ch.length + sp.length + gh.length;
-  let idx = 0;
-  ch.forEach((cid) => {
-    idx++;
-    _trav(cid, d + 1, idx === tot, vis, r, cur, pv, gt, nodes);
-  });
-  sp.forEach((e) => {
-    idx++;
-    r.push({
-      indent: d + 1,
-      label: gt(e.toNodeId),
-      nodeId: e.toNodeId,
-      isCurrent: e.toNodeId === cur,
-      connector: idx === tot ? "└╌" : "├╌",
-      edgeType: e.type,
-    });
-  });
-  gh.forEach((g) => {
-    idx++;
-    g.connector =
-      idx === tot ? (g.edgeType ? "└╌" : "└─") : g.edgeType ? "├╌" : "├─";
-    r.push(g);
-  });
-}
-
-// ━━━ Markdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-function renderFmt(t: string): {
-  className?: string;
-  content: (string | JSX.Element)[];
-} {
-  if (t.startsWith("### "))
-    return {
-      className: "text-[var(--text-primary)] font-bold text-[13px]",
-      content: renderInl(t.slice(4)),
-    };
-  if (t.startsWith("## "))
-    return {
-      className: "text-[var(--text-primary)] font-bold text-[15px]",
-      content: renderInl(t.slice(3)),
-    };
-  if (t.startsWith("# "))
-    return {
-      className: "text-[var(--text-primary)] font-bold text-[17px]",
-      content: renderInl(t.slice(2)),
-    };
-  if (/^\s*[-*]\s/.test(t))
-    return {
-      content: [
-        <span key="b" className="text-[var(--text-faint)]">
-          {" "}
-          •{" "}
-        </span>,
-        ...renderInl(t.replace(/^\s*[-*]\s/, "")),
-      ],
-    };
-  if (t.trim() === "") return { content: [] };
-  return { content: renderInl(t) };
-}
-function renderInl(t: string): (string | JSX.Element)[] {
-  const o: (string | JSX.Element)[] = [];
-  let k = 0;
-  const re = /(\*\*(.+?)\*\*)|(\*(.+?)\*)|(`(.+?)`)|(\[\[(.+?)\]\])/g;
-  let li = 0,
-    m;
-  while ((m = re.exec(t)) !== null) {
-    if (m.index > li) o.push(t.slice(li, m.index));
-    if (m[1])
-      o.push(
-        <span key={k++} className="text-[var(--text-primary)] font-bold">
-          {m[2]}
-        </span>
-      );
-    else if (m[3])
-      o.push(
-        <span key={k++} className="text-[var(--text-primary)] italic">
-          {m[4]}
-        </span>
-      );
-    else if (m[5])
-      o.push(
-        <code
-          key={k++}
-          className="bg-[var(--code-bg)] text-[var(--code-text)] px-1 rounded"
-        >
-          {m[6]}
-        </code>
-      );
-    else if (m[7])
-      o.push(
-        <span
-          key={k++}
-          className="text-[var(--link-color)] underline decoration-[var(--link-color)]/30"
-        >
-          [[{m[8]}]]
-        </span>
-      );
-    li = m.index + m[0].length;
-  }
-  if (li < t.length) o.push(t.slice(li));
-  return o.length > 0 ? o : [t];
-}
-
-// ━━━ Help content ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-const HELP_SECTIONS = [
-  {
-    title: "Navigation",
-    items: [
-      ["j / k", "Move down / up"],
-      ["h / l", "Move left / right"],
-      ["w / b / e", "Next / prev / end word"],
-      ["0 / $ / ^", "Line start / end / first char"],
-      ["gg / G", "Document top / bottom"],
-    ],
-  },
-  {
-    title: "Editing",
-    items: [
-      ["i / a / A / I", "Insert before / after / end / start"],
-      ["o / O", "New line below / above"],
-      ["dd / dw / D", "Delete line / word / to end"],
-      ["cc / cw / C", "Change line / word / to end"],
-      ['ci" ci( ci[', "Change inside pair"],
-      ["x / r{c} / ~", "Delete char / replace / toggle case"],
-      ["J", "Join lines"],
-      ["u / Ctrl+R", "Undo / redo"],
-      ["v → d/y/c", "Visual select → action"],
-      ["yy / p / P", "Yank line / paste below / above"],
-    ],
-  },
-  {
-    title: "App",
-    items: [
-      ["Space", "Open link panel"],
-      ["g", "Toggle graph / notes view"],
-      ["q", "Close note → list"],
-      ["n", "Create new node"],
-      ["dd", "Delete node"],
-      ["/", "Search nodes"],
-      ["Ctrl+S", "Save current note"],
-      ["Esc", "Exit mode (INSERT→NORMAL)"],
-      ["[[", "Wiki-link autocomplete"],
-      ["?", "This help panel"],
-    ],
-  },
-  {
-    title: "Link Panel",
-    items: [
-      ["h / l", "Change link type"],
-      ["j / k", "Navigate vertically through sections"],
-      ["f", "Focus filter input"],
-      ["d", "Delete connection"],
-      ["Enter / Space", "Create link"],
-      ["Esc", "Close panel"],
-    ],
-  },
-];
-
-function buildDoc(t: string, c: string): string[] {
-  return ["## " + t, "", ...(c ? c.split("\n") : [""])];
-}
-
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 export default function Dashboard() {
   const { data: session } = useSession();
   const [theme, setTheme] = useState<"dark" | "light">(() => {
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined")
       return (localStorage.getItem("kt-theme") as "dark" | "light") || "dark";
-    }
     return "dark";
   });
-
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("kt-theme", theme);
   }, [theme]);
+
   const [view, setView] = useState<"notes" | "graph">("notes");
   const [uiFocus, setUIFocus] = useState<UIFocus>("list");
   const [listIdx, setListIdx] = useState(0);
@@ -458,13 +116,15 @@ export default function Dashboard() {
   const [lines, setLines] = useState<string[]>([]);
   const [cursor, setCursor] = useState<Pos>({ line: 0, col: 0 });
   const [visualAnchor, setVisualAnchor] = useState<Pos | null>(null);
+  const [visualLineAnchor, setVisualLineAnchor] = useState<number | null>(null);
   const [yankReg, setYankReg] = useState("");
+  const [yankIsLine, setYankIsLine] = useState(false);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
+  const [countStr, setCountStr] = useState("");
   const desiredCol = useRef(0);
   const [undoStack, setUndoStack] = useState<DocSnapshot[]>([]);
   const [redoStack, setRedoStack] = useState<DocSnapshot[]>([]);
 
-  // ★ Refs for latest state — fixes stale closure in rapid keypresses
   const linesRef = useRef(lines);
   const cursorRef = useRef(cursor);
   useEffect(() => {
@@ -480,7 +140,7 @@ export default function Dashboard() {
       { lines: [...linesRef.current], cursor: { ...cursorRef.current } },
     ]);
     setRedoStack([]);
-  }, []); // stable — reads from refs
+  }, []);
 
   // Linker
   const [showLinker, setShowLinker] = useState(false);
@@ -490,7 +150,6 @@ export default function Dashboard() {
   const [linkCandIdx, setLinkCandIdx] = useState(0);
   const [connIdx, setConnIdx] = useState(0);
   const linkSearchRef = useRef<HTMLInputElement>(null);
-
   const [searchQuery, setSearchQuery] = useState("");
   const [searchIdx, setSearchIdx] = useState(0);
   const [showSearch, setShowSearch] = useState(false);
@@ -512,7 +171,26 @@ export default function Dashboard() {
   }, []);
   const gTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // tRPC optimistic
+  // ★ VimCtx — shared context for all vim operations
+  const vimCtx: VimCtx = useMemo(
+    () => ({
+      linesRef,
+      cursorRef,
+      desiredCol,
+      setLines,
+      setCursor,
+      setVimMode,
+      setYankReg,
+      setYankIsLine,
+      setVisualAnchor,
+      setVisualLineAnchor,
+      pushUndo,
+      flash,
+    }),
+    [pushUndo, flash]
+  );
+
+  // ━━━ tRPC ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   const utils = trpc.useUtils();
   const { data: nodes, isLoading } = trpc.node.getAll.useQuery();
 
@@ -654,7 +332,7 @@ export default function Dashboard() {
     onSettled: () => setTimeout(() => utils.node.getAll.invalidate(), 300),
   });
 
-  // Derived
+  // ━━━ Derived ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   const sortedNodes = useMemo(
     () =>
       nodes
@@ -726,12 +404,6 @@ export default function Dashboard() {
     [nodes]
   );
 
-  function extractDoc(d: string[]): { title: string; content: string } {
-    return {
-      title: (d[0] || "").replace(/^#+\s*/, "").trim() || "Untitled",
-      content: d.slice(2).join("\n"),
-    };
-  }
   const saveDoc = useCallback(() => {
     if (!selectedNodeId || linesRef.current.length === 0) return;
     const { title, content } = extractDoc(linesRef.current);
@@ -755,6 +427,7 @@ export default function Dashboard() {
       desiredCol.current = 0;
       setVimMode("NORMAL");
       setVisualAnchor(null);
+      setVisualLineAnchor(null);
       setUndoStack([]);
       setRedoStack([]);
       const idx = sortedNodes.findIndex((n) => n.id === nodeId);
@@ -838,7 +511,6 @@ export default function Dashboard() {
       });
     }
   }, [nodes, isCreating, isLoading]);
-
   useEffect(() => {
     if (uiFocus === "editor")
       document
@@ -846,19 +518,7 @@ export default function Dashboard() {
         ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [cursor.line, uiFocus]);
 
-  // ★ Vim helpers — all use linesRef/cursorRef for freshness
-  function insertChar(ch: string) {
-    pushUndo();
-    const cur = cursorRef.current;
-    setLines((p) => {
-      const nl = [...p];
-      nl[cur.line] =
-        nl[cur.line].slice(0, cur.col) + ch + nl[cur.line].slice(cur.col);
-      return nl;
-    });
-    setCursor({ line: cur.line, col: cur.col + ch.length });
-    desiredCol.current = cur.col + ch.length;
-  }
+  // ★ Local helpers
   function checkBracket() {
     setTimeout(() => {
       const cl = linesRef.current;
@@ -916,171 +576,6 @@ export default function Dashboard() {
     setRedoStack((p) => p.slice(0, -1));
     setLines(s.lines);
     setCursor(s.cursor);
-  }
-  function deleteLine() {
-    pushUndo();
-    const cur = cursorRef.current;
-    setLines((p) => {
-      const nl = [...p];
-      setYankReg(nl[cur.line] || "");
-      if (nl.length === 1) {
-        nl[0] = "";
-        setCursor({ line: 0, col: 0 });
-      } else {
-        nl.splice(cur.line, 1);
-        setCursor({ line: Math.min(cur.line, nl.length - 1), col: 0 });
-      }
-      return nl;
-    });
-  }
-  function deleteToEOL() {
-    pushUndo();
-    const cur = cursorRef.current;
-    setLines((p) => {
-      const nl = [...p];
-      setYankReg(nl[cur.line].slice(cur.col));
-      nl[cur.line] = nl[cur.line].slice(0, cur.col);
-      return nl;
-    });
-  }
-  function changeLine() {
-    pushUndo();
-    const cur = cursorRef.current;
-    setYankReg(linesRef.current[cur.line]);
-    setLines((p) => {
-      const nl = [...p];
-      nl[cur.line] = "";
-      return nl;
-    });
-    setCursor({ ...cur, col: 0 });
-    setVimMode("INSERT");
-  }
-  function deleteWord() {
-    pushUndo();
-    const cur = cursorRef.current;
-    const l = linesRef.current[cur.line] || "";
-    const end = nextWord(l, cur.col);
-    setYankReg(l.slice(cur.col, end));
-    setLines((p) => {
-      const nl = [...p];
-      nl[cur.line] = l.slice(0, cur.col) + l.slice(end);
-      return nl;
-    });
-  }
-  function changeWord() {
-    deleteWord();
-    setVimMode("INSERT");
-  }
-  function deleteInsidePair(o: string, c: string) {
-    const cur = cursorRef.current;
-    const l = linesRef.current[cur.line] || "";
-    const p = findMatchingPair(l, cur.col, o, c);
-    if (!p) return;
-    pushUndo();
-    setYankReg(l.slice(p[0] + 1, p[1]));
-    setLines((pr) => {
-      const nl = [...pr];
-      nl[cur.line] = l.slice(0, p[0] + 1) + l.slice(p[1]);
-      return nl;
-    });
-    setCursor({ ...cur, col: p[0] + 1 });
-  }
-  function changeInsidePair(o: string, c: string) {
-    deleteInsidePair(o, c);
-    setVimMode("INSERT");
-  }
-  function joinLines() {
-    const cur = cursorRef.current;
-    if (cur.line >= linesRef.current.length - 1) return;
-    pushUndo();
-    setLines((p) => {
-      const nl = [...p];
-      const jc = nl[cur.line].length;
-      nl[cur.line] += " " + nl[cur.line + 1].trimStart();
-      nl.splice(cur.line + 1, 1);
-      setCursor({ ...cur, col: jc });
-      return nl;
-    });
-  }
-  function replaceChar(ch: string) {
-    pushUndo();
-    const cur = cursorRef.current;
-    setLines((p) => {
-      const nl = [...p];
-      const l = nl[cur.line];
-      if (cur.col < l.length)
-        nl[cur.line] = l.slice(0, cur.col) + ch + l.slice(cur.col + 1);
-      return nl;
-    });
-  }
-  function toggleCase() {
-    const cur = cursorRef.current;
-    const l = linesRef.current[cur.line] || "";
-    const ch = l[cur.col];
-    if (!ch) return;
-    pushUndo();
-    setLines((p) => {
-      const nl = [...p];
-      nl[cur.line] =
-        l.slice(0, cur.col) +
-        (ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase()) +
-        l.slice(cur.col + 1);
-      return nl;
-    });
-    setCursor({ ...cur, col: Math.min(cur.col + 1, l.length - 1) });
-  }
-  function deleteSelection() {
-    if (!visualAnchor) return;
-    pushUndo();
-    const cur = cursorRef.current;
-    const s = posMin(visualAnchor, cur),
-      e = posMax(visualAnchor, cur);
-    setLines((p) => {
-      const nl = [...p];
-      if (s.line === e.line) {
-        setYankReg(nl[s.line].slice(s.col, e.col + 1));
-        nl[s.line] = nl[s.line].slice(0, s.col) + nl[s.line].slice(e.col + 1);
-      } else {
-        const ch = [nl[s.line].slice(s.col)];
-        for (let i = s.line + 1; i < e.line; i++) ch.push(nl[i]);
-        ch.push(nl[e.line].slice(0, e.col + 1));
-        setYankReg(ch.join("\n"));
-        nl[s.line] = nl[s.line].slice(0, s.col) + nl[e.line].slice(e.col + 1);
-        nl.splice(s.line + 1, e.line - s.line);
-      }
-      return nl;
-    });
-    setCursor(posMin(visualAnchor, cur));
-    setVimMode("NORMAL");
-    setVisualAnchor(null);
-  }
-  function yankSelection() {
-    if (!visualAnchor) return;
-    const cur = cursorRef.current;
-    const cl = linesRef.current;
-    const s = posMin(visualAnchor, cur),
-      e = posMax(visualAnchor, cur);
-    if (s.line === e.line) setYankReg(cl[s.line].slice(s.col, e.col + 1));
-    else {
-      const ch = [cl[s.line].slice(s.col)];
-      for (let i = s.line + 1; i < e.line; i++) ch.push(cl[i]);
-      ch.push(cl[e.line].slice(0, e.col + 1));
-      setYankReg(ch.join("\n"));
-    }
-    setCursor(posMin(visualAnchor, cur));
-    setVimMode("NORMAL");
-    setVisualAnchor(null);
-    flash("Yanked");
-  }
-  function isSelected(li: number, ci: number): boolean {
-    if (vimMode !== "VISUAL" || !visualAnchor) return false;
-    const s = posMin(visualAnchor, cursor),
-      e = posMax(visualAnchor, cursor);
-    if (li < s.line || li > e.line) return false;
-    if (li === s.line && li === e.line) return ci >= s.col && ci <= e.col;
-    if (li === s.line) return ci >= s.col;
-    if (li === e.line) return ci <= e.col;
-    return true;
   }
   function moveCursor(dir: string) {
     const cur = cursorRef.current;
@@ -1146,16 +641,64 @@ export default function Dashboard() {
     []
   );
 
-  // ━━━ KEYBOARD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ━━━ KEYBOARD HANDLER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
-      // Allow Ctrl+V / Cmd+V to pass through to paste handler
-      if ((e.metaKey || e.ctrlKey) && e.key === "v") {
-        return; // handled by paste listener below
-      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "v" && vimMode === "INSERT")
+        return; // let browser handle in INSERT
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
         saveDoc();
+        return;
+      }
+      // Ctrl+Z undo (works in all modes)
+      if ((e.ctrlKey || e.metaKey) && e.key === "z") {
+        e.preventDefault();
+        doUndo();
+        return;
+      }
+      // Ctrl+A select all (works in editor)
+      if ((e.ctrlKey || e.metaKey) && e.key === "a" && uiFocus === "editor") {
+        e.preventDefault();
+        selectAll(vimCtx);
+        return;
+      }
+      // Ctrl+V paste from clipboard in NORMAL/VISUAL modes
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        e.key === "v" &&
+        uiFocus === "editor" &&
+        vimMode !== "INSERT"
+      ) {
+        e.preventDefault();
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (!text) return;
+            pushUndo();
+            const cur = cursorRef.current;
+            const hasNewline = text.includes("\n");
+            if (hasNewline) {
+              const pasteLines = text.split("\n");
+              setLines((p) => {
+                const nl = [...p];
+                nl.splice(cur.line + 1, 0, ...pasteLines);
+                return nl;
+              });
+              setCursor({ line: cur.line + 1, col: 0 });
+            } else {
+              setLines((p) => {
+                const nl = [...p];
+                nl[cur.line] =
+                  nl[cur.line].slice(0, cur.col + 1) +
+                  text +
+                  nl[cur.line].slice(cur.col + 1);
+                return nl;
+              });
+              setCursor({ ...cur, col: cur.col + text.length });
+            }
+          })
+          .catch(() => {});
         return;
       }
       if (showHelp) {
@@ -1259,7 +802,6 @@ export default function Dashboard() {
           }, 20);
           return;
         }
-
         if (linkerFocus === "conns") {
           if (e.key === "j") {
             e.preventDefault();
@@ -1332,9 +874,10 @@ export default function Dashboard() {
       // ━━ Escape ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       if (e.key === "Escape") {
         e.preventDefault();
-        if (vimMode === "VISUAL") {
+        if (vimMode === "VISUAL" || vimMode === "VISUAL_LINE") {
           setVimMode("NORMAL");
           setVisualAnchor(null);
+          setVisualLineAnchor(null);
           return;
         }
         if (vimMode === "INSERT") {
@@ -1353,6 +896,7 @@ export default function Dashboard() {
           return;
         }
         setPendingKey(null);
+        setCountStr("");
         return;
       }
       if (e.key === "?" && uiFocus !== "editor") {
@@ -1365,7 +909,6 @@ export default function Dashboard() {
       if (uiFocus === "list") {
         const tag = (e.target as HTMLElement)?.tagName;
         if (tag === "INPUT" || tag === "TEXTAREA") return;
-        // dd to delete node in list
         if (pendingKey === "d" && e.key === "d") {
           e.preventDefault();
           setPendingKey(null);
@@ -1425,7 +968,7 @@ export default function Dashboard() {
         return;
       }
 
-      // ★ INSERT — all reads via cursorRef for freshness
+      // ★ INSERT
       if (vimMode === "INSERT") {
         const cur = cursorRef.current;
         const cl = linesRef.current;
@@ -1517,49 +1060,270 @@ export default function Dashboard() {
         }
         if (e.key === "Tab") {
           e.preventDefault();
-          insertChar("  ");
+          insertChar(vimCtx, "  ");
           return;
         }
         if (e.key.length === 1 && !e.metaKey && !e.ctrlKey) {
           e.preventDefault();
-          insertChar(e.key);
+          insertChar(vimCtx, e.key);
           checkBracket();
           return;
         }
         return;
       }
 
-      // ━━ VISUAL ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-      if (vimMode === "VISUAL") {
-        if ("hjkl".includes(e.key)) {
+      // ━━ VISUAL_LINE / VISUAL / NORMAL — shared count prefix ━━━━━━━━━━
+      // Digits accumulate globally across all non-INSERT editor modes.
+      // Count persists through pending states (e.g. d→5→j = delete 5 lines down).
+      // "0" is a digit only when building a count (otherwise = go to line start).
+      if (/^[1-9]$/.test(e.key) || (e.key === "0" && countStr !== "")) {
+        e.preventDefault();
+        setCountStr((c) => c + e.key);
+        return;
+      }
+
+      // ━━ VISUAL_LINE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      if (vimMode === "VISUAL_LINE") {
+        const cnt = parseInt(countStr) || 1;
+        setCountStr("");
+        const cur = cursorRef.current;
+        const cl = linesRef.current;
+        if (e.key === "j") {
           e.preventDefault();
-          moveCursor(e.key);
+          const nl = Math.min(cur.line + cnt, cl.length - 1);
+          setCursor({
+            line: nl,
+            col: clampCol(cl, nl, desiredCol.current, false),
+          });
           return;
         }
-        if (e.key === "w") {
+        if (e.key === "k") {
           e.preventDefault();
-          moveCursorWord("w");
-          return;
-        }
-        if (e.key === "b") {
-          e.preventDefault();
-          moveCursorWord("b");
+          const nl = Math.max(cur.line - cnt, 0);
+          setCursor({
+            line: nl,
+            col: clampCol(cl, nl, desiredCol.current, false),
+          });
           return;
         }
         if (e.key === "d" || e.key === "x") {
           e.preventDefault();
-          deleteSelection();
+          deleteLineSelection(vimCtx, visualLineAnchor ?? cur.line, cur.line);
           return;
         }
         if (e.key === "y") {
           e.preventDefault();
-          yankSelection();
+          yankLineSelection(vimCtx, visualLineAnchor ?? cur.line, cur.line);
           return;
         }
         if (e.key === "c") {
           e.preventDefault();
-          deleteSelection();
-          setVimMode("INSERT");
+          changeLineSelection(vimCtx, visualLineAnchor ?? cur.line, cur.line);
+          return;
+        }
+        if (e.key === ">" || e.key === "<") {
+          e.preventDefault();
+          const s = Math.min(visualLineAnchor ?? cur.line, cur.line),
+            en = Math.max(visualLineAnchor ?? cur.line, cur.line);
+          if (e.key === ">") indentLines(vimCtx, s, en);
+          else outdentLines(vimCtx, s, en);
+          return;
+        }
+        if (e.key === "G") {
+          e.preventDefault();
+          setCursor({ line: cl.length - 1, col: 0 });
+          return;
+        }
+        if (e.key === "v") {
+          e.preventDefault();
+          setVimMode("VISUAL");
+          setVisualAnchor({ line: visualLineAnchor ?? cur.line, col: 0 });
+          setVisualLineAnchor(null);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          setVimMode("NORMAL");
+          setVisualLineAnchor(null);
+          return;
+        }
+        return;
+      }
+
+      // ━━ VISUAL (count-aware motions) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      if (vimMode === "VISUAL") {
+        const cnt = parseInt(countStr) || 1;
+        setCountStr("");
+        const cur = cursorRef.current;
+        const cl = linesRef.current;
+        if (e.key === "h") {
+          e.preventDefault();
+          setCursor({ ...cur, col: Math.max(0, cur.col - cnt) });
+          return;
+        }
+        if (e.key === "l") {
+          e.preventDefault();
+          setCursor({
+            ...cur,
+            col: Math.min(
+              cur.col + cnt,
+              Math.max(0, (cl[cur.line]?.length ?? 1) - 1)
+            ),
+          });
+          return;
+        }
+        if (e.key === "j") {
+          e.preventDefault();
+          const nl = Math.min(cur.line + cnt, cl.length - 1);
+          setCursor({
+            line: nl,
+            col: clampCol(cl, nl, desiredCol.current, false),
+          });
+          return;
+        }
+        if (e.key === "k") {
+          e.preventDefault();
+          const nl = Math.max(cur.line - cnt, 0);
+          setCursor({
+            line: nl,
+            col: clampCol(cl, nl, desiredCol.current, false),
+          });
+          return;
+        }
+        if (e.key === "w") {
+          e.preventDefault();
+          let ln = cur.line,
+            c = cur.col;
+          for (let i = 0; i < cnt; i++) {
+            const nc = nextWord(cl[ln] || "", c);
+            if (nc >= (cl[ln]?.length ?? 0) && ln < cl.length - 1) {
+              ln++;
+              c = 0;
+            } else c = Math.min(nc, Math.max(0, (cl[ln]?.length ?? 1) - 1));
+          }
+          setCursor({ line: ln, col: c });
+          return;
+        }
+        if (e.key === "b") {
+          e.preventDefault();
+          let ln = cur.line,
+            c = cur.col;
+          for (let i = 0; i < cnt; i++) {
+            const nc = prevWord(cl[ln] || "", c);
+            if (nc === 0 && c === 0 && ln > 0) {
+              ln--;
+              c = Math.max(0, (cl[ln]?.length ?? 1) - 1);
+            } else c = nc;
+          }
+          setCursor({ line: ln, col: c });
+          return;
+        }
+        if (e.key === "e") {
+          e.preventDefault();
+          let c = cur.col;
+          for (let i = 0; i < cnt; i++) c = endOfWord(cl[cur.line] || "", c);
+          setCursor({ ...cur, col: c });
+          return;
+        }
+        if (e.key === "W") {
+          e.preventDefault();
+          let ln = cur.line,
+            c = cur.col;
+          for (let i = 0; i < cnt; i++) {
+            const nc = nextWORD(cl[ln] || "", c);
+            if (nc >= (cl[ln]?.length ?? 0) && ln < cl.length - 1) {
+              ln++;
+              c = 0;
+            } else c = Math.min(nc, Math.max(0, (cl[ln]?.length ?? 1) - 1));
+          }
+          setCursor({ line: ln, col: c });
+          return;
+        }
+        if (e.key === "B") {
+          e.preventDefault();
+          let ln = cur.line,
+            c = cur.col;
+          for (let i = 0; i < cnt; i++) {
+            const nc = prevWORD(cl[ln] || "", c);
+            if (nc === 0 && c === 0 && ln > 0) {
+              ln--;
+              c = Math.max(0, (cl[ln]?.length ?? 1) - 1);
+            } else c = nc;
+          }
+          setCursor({ line: ln, col: c });
+          return;
+        }
+        if (e.key === "E") {
+          e.preventDefault();
+          let c = cur.col;
+          for (let i = 0; i < cnt; i++) c = endOfWORD(cl[cur.line] || "", c);
+          setCursor({ ...cur, col: c });
+          return;
+        }
+        if (e.key === "{") {
+          e.preventDefault();
+          let ln = cur.line;
+          for (let i = 0; i < cnt; i++) ln = prevParagraph(cl, ln);
+          setCursor({ line: ln, col: 0 });
+          return;
+        }
+        if (e.key === "}") {
+          e.preventDefault();
+          let ln = cur.line;
+          for (let i = 0; i < cnt; i++) ln = nextParagraph(cl, ln);
+          setCursor({ line: ln, col: 0 });
+          return;
+        }
+        if (e.key === "G") {
+          e.preventDefault();
+          setCursor({
+            line: cl.length - 1,
+            col: (cl[cl.length - 1]?.length ?? 1) - 1,
+          });
+          return;
+        }
+        if (e.key === "$") {
+          e.preventDefault();
+          setCursor({
+            ...cur,
+            col: Math.max(0, (cl[cur.line]?.length ?? 1) - 1),
+          });
+          return;
+        }
+        if (e.key === "0") {
+          e.preventDefault();
+          setCursor({ ...cur, col: 0 });
+          return;
+        }
+        if (e.key === "^") {
+          e.preventDefault();
+          const f = (cl[cur.line] || "").search(/\S/);
+          setCursor({ ...cur, col: f >= 0 ? f : 0 });
+          return;
+        }
+        if (e.key === "d" || e.key === "x") {
+          e.preventDefault();
+          if (visualAnchor) deleteSelection(vimCtx, visualAnchor);
+          return;
+        }
+        if (e.key === "y") {
+          e.preventDefault();
+          if (visualAnchor) yankSelection(vimCtx, visualAnchor);
+          return;
+        }
+        if (e.key === "c") {
+          e.preventDefault();
+          if (visualAnchor) {
+            deleteSelection(vimCtx, visualAnchor);
+            setVimMode("INSERT");
+          }
+          return;
+        }
+        if (e.key === "V") {
+          e.preventDefault();
+          setVimMode("VISUAL_LINE");
+          setVisualLineAnchor(visualAnchor?.line ?? cursor.line);
+          setVisualAnchor(null);
           return;
         }
         return;
@@ -1571,45 +1335,18 @@ export default function Dashboard() {
       const cur = cursorRef.current;
       const cl = linesRef.current;
 
+      // Pending key combos — count persists from before the operator OR from after it
       if (pendingKey) {
         e.preventDefault();
+        const count = parseInt(countStr) || 1;
+        setCountStr("");
         const combo = pendingKey + e.key;
-        setPendingKey(null);
-        if (gTimerRef.current) {
-          clearTimeout(gTimerRef.current);
-          gTimerRef.current = null;
-        }
-        if (combo === "dd") {
-          deleteLine();
-          return;
-        }
-        if (combo === "yy") {
-          setYankReg(cl[cur.line] || "");
-          flash("Yanked");
-          return;
-        }
-        if (combo === "gg") {
-          setCursor({ line: 0, col: 0 });
-          desiredCol.current = 0;
-          return;
-        }
-        if (combo === "cc") {
-          changeLine();
-          return;
-        }
-        if (combo === "dw") {
-          deleteWord();
-          return;
-        }
-        if (combo === "cw") {
-          changeWord();
-          return;
-        }
-        if (combo === "de") {
-          deleteWord();
-          return;
-        }
-        if (combo.startsWith("di") || combo.startsWith("ci")) {
+        // 3-char text objects
+        if (pendingKey.length === 2) {
+          setPendingKey(null);
+          const op = pendingKey[0],
+            scope = pendingKey[1],
+            ch = e.key;
           const pairs: Record<string, [string, string]> = {
             '"': ['"', '"'],
             "'": ["'", "'"],
@@ -1620,27 +1357,263 @@ export default function Dashboard() {
             "{": ["{", "}"],
             "}": ["{", "}"],
           };
-          const p = pairs[e.key];
-          if (p) {
-            combo.startsWith("ci")
-              ? changeInsidePair(p[0], p[1])
-              : deleteInsidePair(p[0], p[1]);
+          if (ch === "w") {
+            if (scope === "i") {
+              if (op === "d") deleteInnerWord(vimCtx);
+              else if (op === "c") changeInnerWord(vimCtx);
+              else if (op === "y") yankInnerWord(vimCtx);
+            } else {
+              if (op === "d") deleteAWord(vimCtx);
+              else if (op === "c") changeAWord(vimCtx);
+              else if (op === "y") yankAWord(vimCtx);
+            }
             return;
           }
+          const p = pairs[ch];
+          if (p && scope === "i") {
+            if (op === "c") changeInsidePair(vimCtx, p[0], p[1]);
+            else if (op === "d") deleteInsidePair(vimCtx, p[0], p[1]);
+            else if (op === "y") yankInsidePair(vimCtx, p[0], p[1]);
+            return;
+          }
+          if (p && scope === "a") {
+            if (op === "d") deleteAroundPair(vimCtx, p[0], p[1]);
+            else if (op === "c") changeAroundPair(vimCtx, p[0], p[1]);
+            return;
+          }
+          return;
+        }
+        // Operator + motion: d5j, d3w, y2k, c4w, etc.
+        if (
+          (pendingKey === "d" || pendingKey === "y" || pendingKey === "c") &&
+          "hjklwbeWBE{}$^0".includes(e.key)
+        ) {
+          setPendingKey(null);
+          // Compute motion target
+          let tgtLine = cur.line,
+            tgtCol = cur.col;
+          if (e.key === "j")
+            tgtLine = Math.min(cur.line + count, cl.length - 1);
+          else if (e.key === "k") tgtLine = Math.max(cur.line - count, 0);
+          else if (e.key === "h") tgtCol = Math.max(0, cur.col - count);
+          else if (e.key === "l")
+            tgtCol = Math.min(
+              cur.col + count,
+              Math.max(0, (cl[cur.line]?.length ?? 1) - 1)
+            );
+          else if (e.key === "w" || e.key === "W") {
+            let ln = cur.line,
+              c = cur.col;
+            const fn = e.key === "w" ? nextWord : nextWORD;
+            for (let i = 0; i < count; i++) {
+              const nc = fn(cl[ln] || "", c);
+              if (nc >= (cl[ln]?.length ?? 0) && ln < cl.length - 1) {
+                ln++;
+                c = 0;
+              } else c = Math.min(nc, (cl[ln]?.length ?? 1) - 1);
+            }
+            tgtLine = ln;
+            tgtCol = c;
+          } else if (e.key === "b" || e.key === "B") {
+            let ln = cur.line,
+              c = cur.col;
+            const fn = e.key === "b" ? prevWord : prevWORD;
+            for (let i = 0; i < count; i++) {
+              const nc = fn(cl[ln] || "", c);
+              if (nc === 0 && c === 0 && ln > 0) {
+                ln--;
+                c = Math.max(0, (cl[ln]?.length ?? 1) - 1);
+              } else c = nc;
+            }
+            tgtLine = ln;
+            tgtCol = c;
+          } else if (e.key === "e" || e.key === "E") {
+            let c = cur.col;
+            const fn = e.key === "e" ? endOfWord : endOfWORD;
+            for (let i = 0; i < count; i++) c = fn(cl[cur.line] || "", c);
+            tgtCol = c;
+          } else if (e.key === "{") {
+            let ln = cur.line;
+            for (let i = 0; i < count; i++) ln = prevParagraph(cl, ln);
+            tgtLine = ln;
+            tgtCol = 0;
+          } else if (e.key === "}") {
+            let ln = cur.line;
+            for (let i = 0; i < count; i++) ln = nextParagraph(cl, ln);
+            tgtLine = ln;
+            tgtCol = 0;
+          } else if (e.key === "$")
+            tgtCol = Math.max(0, (cl[cur.line]?.length ?? 1) - 1);
+          else if (e.key === "^") {
+            const f = (cl[cur.line] || "").search(/\S/);
+            tgtCol = f >= 0 ? f : 0;
+          } else if (e.key === "0") tgtCol = 0;
+
+          // Line-wise operations (j/k move full lines)
+          if ("jk".includes(e.key)) {
+            const sL = Math.min(cur.line, tgtLine),
+              eL = Math.max(cur.line, tgtLine);
+            pushUndo();
+            const deleted = cl.slice(sL, eL + 1);
+            if (pendingKey === "d") {
+              setYankReg(deleted.join("\n"));
+              setYankIsLine(true);
+              setLines((p) => {
+                const nl = [...p];
+                nl.splice(sL, eL - sL + 1);
+                if (nl.length === 0) nl.push("");
+                const newL = Math.min(sL, nl.length - 1);
+                setCursor({
+                  line: newL,
+                  col: Math.min(
+                    cur.col,
+                    Math.max(0, (nl[newL]?.length ?? 1) - 1)
+                  ),
+                });
+                return nl;
+              });
+            } else if (pendingKey === "y") {
+              setYankReg(deleted.join("\n"));
+              setYankIsLine(true);
+              flash("Yanked " + deleted.length + " lines");
+            } else if (pendingKey === "c") {
+              setYankReg(deleted.join("\n"));
+              setYankIsLine(true);
+              setLines((p) => {
+                const nl = [...p];
+                nl.splice(sL, eL - sL + 1, "");
+                return nl;
+              });
+              setCursor({ line: sL, col: 0 });
+              setVimMode("INSERT");
+            }
+          } else {
+            // Char-wise operations (w/b/e/h/l/$)
+            const s = posMin(cur, { line: tgtLine, col: tgtCol }),
+              ep = posMax(cur, { line: tgtLine, col: tgtCol });
+            if (pendingKey === "d") {
+              pushUndo();
+              setLines((p) => {
+                const nl = [...p];
+                if (s.line === ep.line) {
+                  setYankReg(nl[s.line].slice(s.col, ep.col));
+                  setYankIsLine(false);
+                  nl[s.line] =
+                    nl[s.line].slice(0, s.col) + nl[s.line].slice(ep.col);
+                } else {
+                  const ch = [nl[s.line].slice(s.col)];
+                  for (let i = s.line + 1; i < ep.line; i++) ch.push(nl[i]);
+                  ch.push(nl[ep.line].slice(0, ep.col));
+                  setYankReg(ch.join("\n"));
+                  setYankIsLine(false);
+                  nl[s.line] =
+                    nl[s.line].slice(0, s.col) + nl[ep.line].slice(ep.col);
+                  nl.splice(s.line + 1, ep.line - s.line);
+                }
+                return nl;
+              });
+              setCursor(s);
+            } else if (pendingKey === "y") {
+              const cl2 = linesRef.current;
+              if (s.line === ep.line) {
+                setYankReg(cl2[s.line].slice(s.col, ep.col));
+              } else {
+                const ch = [cl2[s.line].slice(s.col)];
+                for (let i = s.line + 1; i < ep.line; i++) ch.push(cl2[i]);
+                ch.push(cl2[ep.line].slice(0, ep.col));
+                setYankReg(ch.join("\n"));
+              }
+              setYankIsLine(false);
+              flash("Yanked");
+            } else if (pendingKey === "c") {
+              pushUndo();
+              setLines((p) => {
+                const nl = [...p];
+                if (s.line === ep.line) {
+                  setYankReg(nl[s.line].slice(s.col, ep.col));
+                  nl[s.line] =
+                    nl[s.line].slice(0, s.col) + nl[s.line].slice(ep.col);
+                } else {
+                  const ch = [nl[s.line].slice(s.col)];
+                  for (let i = s.line + 1; i < ep.line; i++) ch.push(nl[i]);
+                  ch.push(nl[ep.line].slice(0, ep.col));
+                  setYankReg(ch.join("\n"));
+                  nl[s.line] =
+                    nl[s.line].slice(0, s.col) + nl[ep.line].slice(ep.col);
+                  nl.splice(s.line + 1, ep.line - s.line);
+                }
+                setYankIsLine(false);
+                return nl;
+              });
+              setCursor(s);
+              setVimMode("INSERT");
+            }
+          }
+          return;
+        }
+        setPendingKey(null);
+        if (gTimerRef.current) {
+          clearTimeout(gTimerRef.current);
+          gTimerRef.current = null;
+        }
+        if (
+          combo === "di" ||
+          combo === "ci" ||
+          combo === "yi" ||
+          combo === "da" ||
+          combo === "ca" ||
+          combo === "ya"
+        ) {
+          setPendingKey(combo);
+          return;
+        }
+        if (combo === "dd") {
+          deleteNLines(vimCtx, count);
+          return;
+        }
+        if (combo === "yy") {
+          yankNLines(vimCtx, count);
+          return;
+        }
+        if (combo === "gg") {
+          setCursor({ line: 0, col: 0 });
+          desiredCol.current = 0;
+          return;
+        }
+        if (combo === "cc") {
+          changeNLines(vimCtx, count);
+          return;
+        }
+        if (combo === "dw") {
+          deleteNWords(vimCtx, count);
+          return;
+        }
+        if (combo === "cw") {
+          changeNWords(vimCtx, count);
+          return;
+        }
+        if (combo === "de") {
+          deleteNWords(vimCtx, count);
+          return;
+        }
+        if (combo === ">>") {
+          indentLine(vimCtx);
+          return;
+        }
+        if (combo === "<<") {
+          outdentLine(vimCtx);
+          return;
         }
         if (pendingKey === "f" || pendingKey === "F") {
-          const nc = findChar(
-            cl[cur.line] || "",
-            cur.col,
-            e.key,
-            pendingKey === "f"
-          );
+          let nc = cur.col;
+          for (let i = 0; i < count; i++)
+            nc = findChar(cl[cur.line] || "", nc, e.key, pendingKey === "f");
           setCursor({ ...cur, col: nc });
           desiredCol.current = nc;
           return;
         }
         if (pendingKey === "r") {
-          replaceChar(e.key);
+          replaceChar(vimCtx, e.key);
           return;
         }
         if (pendingKey === "g") {
@@ -1649,6 +1622,10 @@ export default function Dashboard() {
         }
         return;
       }
+
+      // ★ Non-pending: consume count for direct motions/actions
+      const count = parseInt(countStr) || 1;
+      setCountStr("");
 
       if (e.key === "d") {
         e.preventDefault();
@@ -1680,7 +1657,16 @@ export default function Dashboard() {
         setPendingKey("r");
         return;
       }
-
+      if (e.key === ">") {
+        e.preventDefault();
+        setPendingKey(">");
+        return;
+      }
+      if (e.key === "<") {
+        e.preventDefault();
+        setPendingKey("<");
+        return;
+      }
       if (e.key === "g") {
         e.preventDefault();
         setPendingKey("g");
@@ -1694,17 +1680,15 @@ export default function Dashboard() {
       }
       if (e.key === "G") {
         e.preventDefault();
-        setCursor({
-          line: cl.length - 1,
-          col: clampCol(cl, cl.length - 1, 0, false),
-        });
+        const tgt =
+          count > 1 ? Math.min(count - 1, cl.length - 1) : cl.length - 1;
+        setCursor({ line: tgt, col: clampCol(cl, tgt, 0, false) });
         desiredCol.current = 0;
         return;
       }
-
       if (e.key === "h") {
         e.preventDefault();
-        const nc = Math.max(0, cur.col - 1);
+        const nc = Math.max(0, cur.col - count);
         setCursor({ ...cur, col: nc });
         desiredCol.current = nc;
         return;
@@ -1712,44 +1696,128 @@ export default function Dashboard() {
       if (e.key === "l") {
         e.preventDefault();
         const mx = Math.max(0, (cl[cur.line]?.length ?? 1) - 1);
-        const nc = Math.min(cur.col + 1, mx);
+        const nc = Math.min(cur.col + count, mx);
         setCursor({ ...cur, col: nc });
         desiredCol.current = nc;
         return;
       }
       if (e.key === "j") {
         e.preventDefault();
-        if (cur.line < cl.length - 1)
-          setCursor({
-            line: cur.line + 1,
-            col: clampCol(cl, cur.line + 1, desiredCol.current, false),
-          });
+        const nl = Math.min(cur.line + count, cl.length - 1);
+        setCursor({
+          line: nl,
+          col: clampCol(cl, nl, desiredCol.current, false),
+        });
         return;
       }
       if (e.key === "k") {
         e.preventDefault();
-        if (cur.line > 0)
-          setCursor({
-            line: cur.line - 1,
-            col: clampCol(cl, cur.line - 1, desiredCol.current, false),
-          });
+        const nl = Math.max(cur.line - count, 0);
+        setCursor({
+          line: nl,
+          col: clampCol(cl, nl, desiredCol.current, false),
+        });
         return;
       }
       if (e.key === "w") {
         e.preventDefault();
-        moveCursorWord("w");
+        let ln = cur.line,
+          c = cur.col;
+        for (let i = 0; i < count; i++) {
+          const nc = nextWord(cl[ln] || "", c);
+          if (nc >= (cl[ln]?.length ?? 0) && ln < cl.length - 1) {
+            ln++;
+            c = 0;
+          } else c = Math.min(nc, Math.max(0, (cl[ln]?.length ?? 1) - 1));
+        }
+        desiredCol.current = c;
+        setCursor({ line: ln, col: c });
         return;
       }
       if (e.key === "b") {
         e.preventDefault();
-        moveCursorWord("b");
+        let ln = cur.line,
+          c = cur.col;
+        for (let i = 0; i < count; i++) {
+          const nc = prevWord(cl[ln] || "", c);
+          if (nc === 0 && c === 0 && ln > 0) {
+            ln--;
+            c = Math.max(0, (cl[ln]?.length ?? 1) - 1);
+          } else c = nc;
+        }
+        desiredCol.current = c;
+        setCursor({ line: ln, col: c });
         return;
       }
       if (e.key === "e") {
         e.preventDefault();
-        const nc = endOfWord(cl[cur.line] || "", cur.col);
-        setCursor({ ...cur, col: nc });
-        desiredCol.current = nc;
+        let c = cur.col;
+        for (let i = 0; i < count; i++) c = endOfWord(cl[cur.line] || "", c);
+        desiredCol.current = c;
+        setCursor({ ...cur, col: c });
+        return;
+      }
+      if (e.key === "W") {
+        e.preventDefault();
+        let ln = cur.line,
+          c = cur.col;
+        for (let i = 0; i < count; i++) {
+          const nc = nextWORD(cl[ln] || "", c);
+          if (nc >= (cl[ln]?.length ?? 0) && ln < cl.length - 1) {
+            ln++;
+            c = 0;
+          } else c = Math.min(nc, Math.max(0, (cl[ln]?.length ?? 1) - 1));
+        }
+        desiredCol.current = c;
+        setCursor({ line: ln, col: c });
+        return;
+      }
+      if (e.key === "B") {
+        e.preventDefault();
+        let ln = cur.line,
+          c = cur.col;
+        for (let i = 0; i < count; i++) {
+          const nc = prevWORD(cl[ln] || "", c);
+          if (nc === 0 && c === 0 && ln > 0) {
+            ln--;
+            c = Math.max(0, (cl[ln]?.length ?? 1) - 1);
+          } else c = nc;
+        }
+        desiredCol.current = c;
+        setCursor({ line: ln, col: c });
+        return;
+      }
+      if (e.key === "E") {
+        e.preventDefault();
+        let c = cur.col;
+        for (let i = 0; i < count; i++) c = endOfWORD(cl[cur.line] || "", c);
+        desiredCol.current = c;
+        setCursor({ ...cur, col: c });
+        return;
+      }
+      if (e.key === "{") {
+        e.preventDefault();
+        let ln = cur.line;
+        for (let i = 0; i < count; i++) ln = prevParagraph(cl, ln);
+        setCursor({ line: ln, col: 0 });
+        desiredCol.current = 0;
+        return;
+      }
+      if (e.key === "}") {
+        e.preventDefault();
+        let ln = cur.line;
+        for (let i = 0; i < count; i++) ln = nextParagraph(cl, ln);
+        setCursor({ line: ln, col: 0 });
+        desiredCol.current = 0;
+        return;
+      }
+      if (e.key === "%") {
+        e.preventDefault();
+        const match = findMatchingBracket(cl, cur.line, cur.col);
+        if (match) {
+          setCursor(match);
+          desiredCol.current = match.col;
+        }
         return;
       }
       if (e.key === "0") {
@@ -1771,7 +1839,6 @@ export default function Dashboard() {
         setCursor({ ...cur, col: first >= 0 ? first : 0 });
         return;
       }
-
       if (e.key === "i") {
         e.preventDefault();
         setVimMode("INSERT");
@@ -1823,88 +1890,50 @@ export default function Dashboard() {
         setVimMode("INSERT");
         return;
       }
+      if (e.key === "s") {
+        e.preventDefault();
+        substituteChar(vimCtx);
+        return;
+      }
+      if (e.key === "S") {
+        e.preventDefault();
+        changeLine(vimCtx);
+        return;
+      }
       if (e.key === "x") {
         e.preventDefault();
-        pushUndo();
-        setLines((p) => {
-          const nl = [...p];
-          const ln = nl[cur.line];
-          if (ln.length > 0) {
-            nl[cur.line] = ln.slice(0, cur.col) + ln.slice(cur.col + 1);
-            if (cur.col >= nl[cur.line].length && cur.col > 0)
-              setCursor({ ...cur, col: cur.col - 1 });
-          }
-          return nl;
-        });
+        deleteNChars(vimCtx, count);
         return;
       }
       if (e.key === "J") {
         e.preventDefault();
-        joinLines();
+        joinLines(vimCtx);
         return;
       }
       if (e.key === "~") {
         e.preventDefault();
-        toggleCase();
+        toggleCase(vimCtx);
         return;
       }
       if (e.key === "D") {
         e.preventDefault();
-        deleteToEOL();
+        deleteToEOL(vimCtx);
         return;
       }
       if (e.key === "C") {
         e.preventDefault();
-        deleteToEOL();
+        deleteToEOL(vimCtx);
         setVimMode("INSERT");
         return;
       }
       if (e.key === "p") {
         e.preventDefault();
-        if (yankReg) {
-          pushUndo();
-          if (yankReg.includes("\n")) {
-            setLines((p) => {
-              const nl = [...p];
-              nl.splice(cur.line + 1, 0, yankReg);
-              return nl;
-            });
-            setCursor({ line: cur.line + 1, col: 0 });
-          } else {
-            setLines((p) => {
-              const nl = [...p];
-              nl[cur.line] =
-                nl[cur.line].slice(0, cur.col + 1) +
-                yankReg +
-                nl[cur.line].slice(cur.col + 1);
-              return nl;
-            });
-            setCursor({ ...cur, col: cur.col + 1 });
-          }
-        }
+        pasteAfter(vimCtx, yankReg, yankIsLine);
         return;
       }
       if (e.key === "P") {
         e.preventDefault();
-        if (yankReg) {
-          pushUndo();
-          if (yankReg.includes("\n")) {
-            setLines((p) => {
-              const nl = [...p];
-              nl.splice(cur.line, 0, yankReg);
-              return nl;
-            });
-          } else {
-            setLines((p) => {
-              const nl = [...p];
-              nl[cur.line] =
-                nl[cur.line].slice(0, cur.col) +
-                yankReg +
-                nl[cur.line].slice(cur.col);
-              return nl;
-            });
-          }
-        }
+        pasteBefore(vimCtx, yankReg, yankIsLine);
         return;
       }
       if (e.key === "u") {
@@ -1921,6 +1950,12 @@ export default function Dashboard() {
         e.preventDefault();
         setVimMode("VISUAL");
         setVisualAnchor({ ...cur });
+        return;
+      }
+      if (e.key === "V") {
+        e.preventDefault();
+        setVimMode("VISUAL_LINE");
+        setVisualLineAnchor(cur.line);
         return;
       }
       if (e.key === " ") {
@@ -1975,12 +2010,10 @@ export default function Dashboard() {
       const cur = cursorRef.current;
       const cl = linesRef.current;
       const pasteLines = text.split("\n");
-
       setLines(() => {
         const nl = [...cl];
         const before = nl[cur.line].slice(0, cur.col);
         const after = nl[cur.line].slice(cur.col);
-
         if (pasteLines.length === 1) {
           nl[cur.line] = before + pasteLines[0] + after;
           setCursor({ line: cur.line, col: cur.col + pasteLines[0].length });
@@ -2008,6 +2041,7 @@ export default function Dashboard() {
     vimMode,
     uiFocus,
     pendingKey,
+    countStr,
     listIdx,
     sortedNodes,
     selectedNodeId,
@@ -2018,6 +2052,7 @@ export default function Dashboard() {
     bracketSugs,
     bracketIdx,
     yankReg,
+    yankIsLine,
     showLinker,
     linkerFocus,
     linkTypeIdx,
@@ -2034,6 +2069,9 @@ export default function Dashboard() {
     pushUndo,
     switchToGraph,
     showHelp,
+    visualAnchor,
+    visualLineAnchor,
+    vimCtx,
   ]);
 
   // ━━━ RENDER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2045,18 +2083,60 @@ export default function Dashboard() {
         </span>
       </div>
     );
+
   const modeColor =
     vimMode === "NORMAL"
       ? "#7ee787"
       : vimMode === "INSERT"
       ? "#d29922"
-      : "#79c0ff";
+      : vimMode === "VISUAL"
+      ? "#79c0ff"
+      : "#c084fc";
 
   function renderEditorLine(lineText: string, lineIdx: number) {
     const isCurLine =
       uiFocus === "editor" && lineIdx === cursor.line && !showLinker;
     const lineNum = lineIdx + 1;
     const relNum = Math.abs(lineIdx - cursor.line);
+
+    // Visual line highlighting
+    if (
+      vimMode === "VISUAL_LINE" &&
+      isLineSelected(visualLineAnchor, cursor.line, lineIdx)
+    ) {
+      const chars = lineText.split("");
+      return (
+        <div
+          key={lineIdx}
+          id={`ed-line-${lineIdx}`}
+          className="ed-line flex items-start bg-[#79c0ff]/10"
+        >
+          <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-muted)]">
+            {isCurLine ? lineNum : relNum || lineNum}
+          </span>
+          <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] bg-[#79c0ff]/20">
+            {chars.length === 0 ? (
+              isCurLine ? (
+                <span className="ed-cursor-block">&nbsp;</span>
+              ) : (
+                "\u00A0"
+              )
+            ) : (
+              chars.map((ch, ci) => {
+                if (isCurLine && ci === cursor.col)
+                  return (
+                    <span key={ci} className="ed-cursor-block">
+                      {ch}
+                    </span>
+                  );
+                return <span key={ci}>{ch}</span>;
+              })
+            )}
+          </span>
+        </div>
+      );
+    }
+
     if (isCurLine) {
       const chars = lineText.split("");
       return (
@@ -2091,7 +2171,10 @@ export default function Dashboard() {
                       {ch}
                     </span>
                   );
-                if (isCur && vimMode === "VISUAL")
+                if (
+                  isCur &&
+                  (vimMode === "VISUAL" || vimMode === "VISUAL_LINE")
+                )
                   return (
                     <span
                       key={ci}
@@ -2100,7 +2183,7 @@ export default function Dashboard() {
                       {ch}
                     </span>
                   );
-                if (isSelected(lineIdx, ci))
+                if (isSelected(visualAnchor, cursor, lineIdx, ci))
                   return (
                     <span key={ci} className="bg-[#79c0ff]/20">
                       {ch}
@@ -2116,6 +2199,7 @@ export default function Dashboard() {
         </div>
       );
     }
+
     if (vimMode === "VISUAL" && visualAnchor) {
       const s = posMin(visualAnchor, cursor),
         ep = posMax(visualAnchor, cursor);
@@ -2137,7 +2221,11 @@ export default function Dashboard() {
                 chars.map((ch, ci) => (
                   <span
                     key={ci}
-                    className={isSelected(lineIdx, ci) ? "bg-[#79c0ff]/20" : ""}
+                    className={
+                      isSelected(visualAnchor, cursor, lineIdx, ci)
+                        ? "bg-[#79c0ff]/20"
+                        : ""
+                    }
                   >
                     {ch}
                   </span>
@@ -2148,6 +2236,7 @@ export default function Dashboard() {
         );
       }
     }
+
     const fmt = renderFmt(lineText);
     return (
       <div
@@ -2188,17 +2277,14 @@ export default function Dashboard() {
 
   return (
     <div className="h-screen flex flex-col bg-[var(--bg-primary)] text-[var(--text-secondary)] overflow-hidden">
-      {/* ━━ HEADER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {/* HEADER */}
       <header className="bg-[var(--bg-secondary)] border-b border-[var(--border)] flex-shrink-0 h-11 flex items-center px-4 gap-3">
-        {/* Left */}
         <div className="flex items-center gap-3 flex-shrink-0">
           <span className="text-[#8b5cf6] text-[16px]">◆</span>
           <span className="text-[14px] font-semibold text-[var(--text-primary)] tracking-tight">
             Knowledge Tree
           </span>
         </div>
-
-        {/* View tabs */}
         <div className="flex items-center bg-[var(--bg-tertiary)] rounded-md border border-[var(--border)] overflow-hidden flex-shrink-0">
           <button
             onClick={() => setView("notes")}
@@ -2224,12 +2310,9 @@ export default function Dashboard() {
             <span className="mr-1.5">◇</span>Graph
           </button>
         </div>
-
         <span className="text-[11px] text-[var(--text-faint)] font-mono flex-shrink-0">
           {nodes?.length || 0} nodes
         </span>
-
-        {/* Spacer — always present */}
         <div className="flex-1 min-w-0 flex justify-center">
           {selectedNode && view === "notes" && (
             <span className="text-[12px] text-[var(--text-muted)] font-mono truncate max-w-[300px]">
@@ -2237,8 +2320,6 @@ export default function Dashboard() {
             </span>
           )}
         </div>
-
-        {/* Right — always anchored */}
         <div className="flex items-center gap-2.5 flex-shrink-0">
           <button
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -2255,7 +2336,6 @@ export default function Dashboard() {
           >
             ?
           </button>
-
           <span className="text-[11px] text-[var(--text-dimmed)] font-mono hidden sm:inline">
             {session?.user?.email}
           </span>
@@ -2303,15 +2383,11 @@ export default function Dashboard() {
                     }}
                     className={`w-full text-left px-3 py-1.5 text-[13px] font-mono flex items-center gap-2 ${
                       i === searchIdx
-                        ? "bg-[var(--bg-active)] text-[var(--text-primary)]"
-                        : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
+                        ? "bg-[#da3633]/15 text-[var(--text-primary)]"
+                        : "text-[var(--text-secondary)] hover:bg-[var(--bg-active)]"
                     }`}
                   >
-                    <span
-                      className="w-[6px] h-[6px] rounded-full"
-                      style={{ backgroundColor: getNodeColor(n) }}
-                    />
-                    <span className="truncate">{n.title}</span>
+                    {n.title}
                   </button>
                 ))}
               </div>
@@ -2320,7 +2396,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ━━ MAIN ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {/* MAIN */}
       <div className="flex-1 overflow-hidden flex">
         {view === "notes" ? (
           <>
@@ -2330,7 +2406,6 @@ export default function Dashboard() {
                 selectedNodeId ? "w-[260px] min-w-[260px]" : "flex-1 max-w-lg"
               } h-full border-r border-[var(--border)] flex flex-col bg-[var(--bg-primary)] relative`}
             >
-              {/* Focus indicator */}
               {uiFocus === "list" && (
                 <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#7ee787] z-10" />
               )}
@@ -2383,9 +2458,7 @@ export default function Dashboard() {
                             />
                             <span
                               className={`text-[12px] font-mono truncate ${
-                                isActive
-                                  ? "text-[var(--text-primary)]"
-                                  : isCur
+                                isActive || isCur
                                   ? "text-[var(--text-primary)]"
                                   : "text-[var(--text-secondary)]"
                               }`}
@@ -2414,7 +2487,6 @@ export default function Dashboard() {
             {/* Editor */}
             {selectedNodeId && selectedNode && (
               <div className="flex-1 h-full flex flex-col overflow-hidden bg-[var(--bg-primary)] relative">
-                {/* Focus indicator */}
                 {uiFocus === "editor" && !showLinker && (
                   <div
                     className="absolute top-0 left-0 right-0 h-[2px] z-10"
@@ -2483,11 +2555,15 @@ export default function Dashboard() {
                           onClick={() => insertBracketLink(s)}
                           className={`w-full text-left px-3 py-1.5 text-[12px] font-mono ${
                             i === bracketIdx
-                              ? "bg-[#da3633]/15 text-[var(--text-primary)]"
-                              : "text-[var(--text-secondary)] hover:bg-[var(--bg-active)]"
+                              ? "bg-[var(--bg-active)] text-[var(--text-primary)]"
+                              : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]"
                           }`}
                         >
-                          {s.title}
+                          <span
+                            className="w-[6px] h-[6px] rounded-full"
+                            style={{ backgroundColor: getNodeColor(s) }}
+                          />
+                          <span className="truncate">{s.title}</span>
                         </button>
                       ))}
                     </div>
@@ -2551,7 +2627,7 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* ━━ LINKER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {/* LINKER */}
       {showLinker && selectedNode && (
         <div
           className="fixed inset-0 z-50 flex flex-col items-center justify-center"
@@ -2560,8 +2636,6 @@ export default function Dashboard() {
           }}
         >
           <div className="absolute inset-0 bg-[var(--bg-input)]/70 backdrop-blur-[3px]" />
-
-          {/* ★ Floating tree — big, glassmorphism, prominent */}
           <div className="relative z-10 mb-4 w-full max-w-2xl">
             <div className="bg-[var(--bg-secondary)]/90 backdrop-blur-2xl border border-[var(--border-active)]/40 rounded-2xl px-6 py-5 shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
               <div className="flex items-center gap-2 mb-3">
@@ -2605,209 +2679,172 @@ export default function Dashboard() {
                           }
                           style={
                             tl.isGhost
-                              ? { color: gc, borderColor: gc }
+                              ? {
+                                  borderColor: (gc || "#6e7681") + "60",
+                                  color: gc,
+                                  backgroundColor: (gc || "#6e7681") + "10",
+                                }
+                              : tl.edgeType
+                              ? { color: EDGE_COLORS_BRIGHT[tl.edgeType] }
                               : undefined
                           }
                         >
                           {tl.label}
-                          {tl.isGhost && (
-                            <span className="ml-2 text-[11px] opacity-50">
-                              ← new
-                            </span>
-                          )}
-                          {tl.isCurrent && (
-                            <span className="ml-2 text-[10px] text-[#8b5cf6] opacity-60">
-                              current
-                            </span>
-                          )}
                         </span>
                       </div>
                     );
                   })}
                 </div>
               ) : (
-                <p className="text-[14px] text-[var(--text-faint)] font-mono">
-                  Isolated node — no connections yet
+                <p className="text-[var(--text-dimmed)] text-[13px] font-mono">
+                  No tree structure
                 </p>
               )}
             </div>
           </div>
-
-          {/* ★ Main popup — cleaner, bigger text */}
-          <div className="relative z-10 bg-[var(--bg-secondary)] border border-[var(--border-active)]/60 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] w-full max-w-2xl max-h-[50vh] flex flex-col overflow-hidden">
-            {/* Header */}
-            <div className="flex items-center justify-between px-5 py-3 border-b border-[var(--border)]">
-              <div className="flex items-center gap-2.5">
-                <span className="text-[#8b5cf6] text-[15px]">◆</span>
-                <span className="text-[15px] font-mono font-bold text-[var(--text-primary)]">
-                  {selectedNode.title}
-                </span>
-              </div>
-              <div className="flex items-center gap-3">
-                <span className="text-[11px] text-[var(--text-faint)] font-mono">
-                  Esc close · ? help
-                </span>
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-y-auto custom-scrollbar">
-              {/* Connections */}
-              {allConns.length > 0 && (
-                <div
-                  className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
-                    linkerFocus === "conns" ? "bg-[var(--bg-input)]/60" : ""
-                  }`}
-                >
-                  {sectionIndicator("conns", "Connections")}
-                  <div className="space-y-1">
-                    {allConns.map((c, idx) => {
-                      const tid = c.dir === "out" ? c.toNodeId : c.fromNodeId;
-                      const focused =
-                        linkerFocus === "conns" && connIdx === idx;
-                      return (
-                        <div
-                          key={c.id}
-                          className={`flex items-center gap-2.5 text-[13px] font-mono px-3 py-2 rounded-lg transition-all duration-75 ${
-                            focused
-                              ? "bg-[var(--bg-secondary)] ring-1 ring-[#f85149]/40"
-                              : "hover:bg-[var(--bg-tertiary)]/50"
-                          }`}
-                        >
-                          <span
-                            className="w-[6px] h-[6px] rounded-full flex-shrink-0"
-                            style={{
-                              backgroundColor:
-                                EDGE_COLORS_BRIGHT[c.type] || "#7d8590",
-                            }}
-                          />
-                          <span className="text-[var(--text-muted)] text-[12px] w-[60px] flex-shrink-0">
-                            {c.type}
-                          </span>
-                          <span className="text-[var(--text-primary)] truncate flex-1">
-                            {getNodeTitle(tid)}
-                          </span>
-                          {focused && (
-                            <span className="text-[11px] text-[#f85149] flex-shrink-0 font-medium">
-                              d:unlink
-                            </span>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Type selector */}
+          <div className="relative z-10 w-full max-w-md bg-[var(--bg-secondary)] border border-[var(--border-active)] rounded-xl shadow-2xl overflow-hidden max-h-[50vh] flex flex-col">
+            {allConns.length > 0 && (
               <div
                 className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
-                  linkerFocus === "type" ? "bg-[var(--bg-input)]/60" : ""
+                  linkerFocus === "conns" ? "bg-[var(--bg-input)]/60" : ""
                 }`}
               >
-                {sectionIndicator("type", "Link Type")}
-                <div className="flex gap-2">
-                  {LINK_TYPES.map((lt, idx) => (
-                    <button
-                      key={lt.type}
-                      onClick={() => setLinkTypeIdx(idx)}
-                      className={`flex-1 py-2.5 rounded-lg text-[13px] font-mono font-medium transition-all duration-75 flex flex-col items-center gap-1 border ${
-                        linkTypeIdx === idx
-                          ? "text-[var(--text-primary)] font-bold"
-                          : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-primary)] border-[var(--border)]"
-                      }`}
-                      style={
-                        linkTypeIdx === idx
-                          ? {
-                              backgroundColor: lt.color + "25",
-                              borderColor: lt.color + "80",
-                            }
-                          : undefined
-                      }
-                    >
-                      <span className="text-[16px]">{lt.icon}</span>
-                      <span>{lt.label}</span>
-                    </button>
-                  ))}
-                </div>
-                {linkerFocus === "type" && (
-                  <p className="text-[11px] text-[var(--text-muted)] font-mono mt-2 text-center">
-                    ← h / l → change type · ↓ j candidates · ↑ k connections
-                  </p>
-                )}
-              </div>
-
-              {/* Candidates */}
-              <div
-                className={`px-5 py-3 transition-colors ${
-                  linkerFocus === "candidates" || linkerFocus === "filter"
-                    ? "bg-[var(--bg-input)]/60"
-                    : ""
-                }`}
-              >
-                {sectionIndicator("candidates", "Candidates")}
-                <div className="mb-2.5">
-                  <div className="relative">
-                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-[var(--text-muted)] font-mono">
-                      f/
-                    </span>
-                    <input
-                      ref={linkSearchRef}
-                      type="text"
-                      value={linkSearch}
-                      onChange={(e) => {
-                        setLinkSearch(e.target.value);
-                        setLinkCandIdx(0);
-                      }}
-                      onFocus={() => setLinkerFocus("filter")}
-                      placeholder="filter nodes…"
-                      className={`w-full pl-8 pr-3 py-2 bg-[var(--bg-input)] border rounded-lg text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none transition-colors ${
-                        linkerFocus === "filter"
-                          ? "border-[#8b5cf6]/50"
-                          : "border-[var(--border)]"
-                      }`}
-                    />
-                  </div>
-                </div>
-                <div className="space-y-1 max-h-[200px] overflow-y-auto custom-scrollbar">
-                  {linkCandidates.map((c, idx) => {
-                    const focused =
-                      linkerFocus === "candidates" && linkCandIdx === idx;
+                {sectionIndicator("conns", "Connections")}
+                <div className="space-y-1">
+                  {allConns.map((c, idx) => {
+                    const tid = c.dir === "out" ? c.toNodeId : c.fromNodeId;
+                    const focused = linkerFocus === "conns" && connIdx === idx;
                     return (
-                      <button
+                      <div
                         key={c.id}
-                        onClick={() => validateAndLink(c.id)}
-                        className={`w-full text-left px-3 py-2.5 rounded-lg text-[13px] font-mono flex items-center gap-2.5 transition-all duration-75 ${
+                        className={`flex items-center gap-2.5 text-[13px] font-mono px-3 py-2 rounded-lg transition-all duration-75 ${
                           focused
-                            ? "bg-[var(--bg-active)] text-[var(--text-primary)] ring-1 ring-[#8b5cf6]/30"
-                            : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50"
+                            ? "bg-[var(--bg-secondary)] ring-1 ring-[#f85149]/40"
+                            : "hover:bg-[var(--bg-tertiary)]/50"
                         }`}
                       >
                         <span
                           className="w-[6px] h-[6px] rounded-full flex-shrink-0"
-                          style={{ backgroundColor: getNodeColor(c) }}
+                          style={{
+                            backgroundColor:
+                              EDGE_COLORS_BRIGHT[c.type] || "#7d8590",
+                          }}
                         />
-                        <span className="truncate flex-1">{c.title}</span>
+                        <span className="text-[var(--text-muted)] text-[12px] w-[60px] flex-shrink-0">
+                          {c.type}
+                        </span>
+                        <span className="text-[var(--text-primary)] truncate flex-1">
+                          {getNodeTitle(tid)}
+                        </span>
                         {focused && (
-                          <span className="text-[11px] text-[var(--text-muted)] flex-shrink-0">
-                            ⏎ link
+                          <span className="text-[11px] text-[#f85149] flex-shrink-0 font-medium">
+                            d:unlink
                           </span>
                         )}
-                      </button>
+                      </div>
                     );
                   })}
-                  {linkCandidates.length === 0 && (
-                    <p className="text-[13px] text-[var(--text-faint)] font-mono text-center py-5">
-                      {linkSearch ? "no matches" : "no candidates"}
-                    </p>
-                  )}
                 </div>
+              </div>
+            )}
+            <div
+              className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
+                linkerFocus === "type" ? "bg-[var(--bg-input)]/60" : ""
+              }`}
+            >
+              {sectionIndicator("type", "Link Type")}
+              <div className="flex gap-2">
+                {LINK_TYPES.map((lt, idx) => (
+                  <button
+                    key={lt.type}
+                    onClick={() => setLinkTypeIdx(idx)}
+                    className={`flex-1 py-2.5 rounded-lg text-[13px] font-mono font-medium transition-all duration-75 flex flex-col items-center gap-1 border ${
+                      linkTypeIdx === idx
+                        ? "text-[var(--text-primary)] font-bold"
+                        : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-primary)] border-[var(--border)]"
+                    }`}
+                    style={
+                      linkTypeIdx === idx
+                        ? {
+                            backgroundColor: lt.color + "25",
+                            borderColor: lt.color + "80",
+                          }
+                        : undefined
+                    }
+                  >
+                    <span className="text-[16px]">{lt.icon}</span>
+                    <span>{lt.label}</span>
+                  </button>
+                ))}
+              </div>
+              {linkerFocus === "type" && (
+                <p className="text-[11px] text-[var(--text-muted)] font-mono mt-2 text-center">
+                  ← h / l → change type · ↓ j candidates · ↑ k connections
+                </p>
+              )}
+            </div>
+            <div
+              className={`px-5 py-3 transition-colors ${
+                linkerFocus === "candidates" || linkerFocus === "filter"
+                  ? "bg-[var(--bg-input)]/60"
+                  : ""
+              }`}
+            >
+              {sectionIndicator("candidates", "Candidates")}
+              <div className="mb-2.5">
+                <div className="relative">
+                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-[var(--text-muted)] font-mono">
+                    f/
+                  </span>
+                  <input
+                    ref={linkSearchRef}
+                    type="text"
+                    value={linkSearch}
+                    onChange={(e) => {
+                      setLinkSearch(e.target.value);
+                      setLinkCandIdx(0);
+                    }}
+                    onFocus={() => setLinkerFocus("filter")}
+                    placeholder="filter nodes…"
+                    className={`w-full pl-8 pr-3 py-2 bg-[var(--bg-input)] border rounded-lg text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none transition-colors ${
+                      linkerFocus === "filter"
+                        ? "border-[#7ee787]/50"
+                        : "border-[var(--border)]"
+                    }`}
+                  />
+                </div>
+              </div>
+              <div className="overflow-y-auto max-h-[200px] custom-scrollbar space-y-0.5">
+                {linkCandidates.length > 0 ? (
+                  linkCandidates.map((n, idx) => (
+                    <button
+                      key={n.id}
+                      onClick={() => validateAndLink(n.id)}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-[13px] font-mono transition-all duration-75 flex items-center gap-2.5 ${
+                        linkerFocus === "candidates" && linkCandIdx === idx
+                          ? "bg-[var(--bg-secondary)] ring-1 ring-[#7ee787]/40 text-[var(--text-primary)]"
+                          : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50"
+                      }`}
+                    >
+                      <span
+                        className="w-[6px] h-[6px] rounded-full flex-shrink-0"
+                        style={{ backgroundColor: getNodeColor(n) }}
+                      />
+                      <span className="truncate">{n.title}</span>
+                    </button>
+                  ))
+                ) : (
+                  <p className="text-[var(--text-dimmed)] text-[12px] font-mono text-center py-3">
+                    {linkSearch ? "no matches" : "no candidates"}
+                  </p>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* ━━ CREATE ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {/* CREATE */}
       {isCreating && (
         <div className="fixed inset-0 z-50 bg-[var(--bg-primary)]/80 backdrop-blur-sm flex items-center justify-center">
           <div className="bg-[var(--bg-secondary)] border border-[var(--border)] rounded-lg shadow-2xl w-full max-w-sm p-4 space-y-3">
@@ -2856,7 +2893,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ━━ HELP ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {/* HELP */}
       {showHelp && (
         <div
           className="fixed inset-0 z-50 bg-[var(--bg-primary)]/80 backdrop-blur-sm flex items-center justify-center"
@@ -2871,25 +2908,28 @@ export default function Dashboard() {
               </span>
               <button
                 onClick={() => setShowHelp(false)}
-                className="text-[var(--text-dimmed)] hover:text-[var(--text-primary)] text-[16px] transition-colors"
+                className="text-[var(--text-dimmed)] hover:text-[var(--text-secondary)] text-[13px] font-mono"
               >
-                ✕
+                esc
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto custom-scrollbar p-5">
+            <div className="overflow-y-auto p-5 custom-scrollbar">
               <div className="grid grid-cols-2 gap-6">
                 {HELP_SECTIONS.map((sec) => (
                   <div key={sec.title}>
-                    <h3 className="text-[13px] font-mono font-bold text-[#8b5cf6] mb-2 uppercase tracking-wider">
+                    <h3 className="text-[12px] font-mono font-bold text-[var(--text-primary)] uppercase tracking-wider mb-2">
                       {sec.title}
                     </h3>
-                    <div className="space-y-1.5">
-                      {sec.items.map(([key, desc]) => (
-                        <div key={key} className="flex items-baseline gap-3">
-                          <kbd className="text-[11px] font-mono text-[var(--text-primary)] bg-[var(--bg-tertiary)] border border-[var(--border-active)] px-1.5 py-0.5 rounded min-w-[60px] text-center flex-shrink-0">
-                            {key}
-                          </kbd>
-                          <span className="text-[12px] text-[var(--text-secondary)] font-mono">
+                    <div className="space-y-1">
+                      {sec.items.map(([keys, desc]) => (
+                        <div
+                          key={keys}
+                          className="flex items-start gap-2 text-[12px] font-mono"
+                        >
+                          <span className="text-[#d29922] min-w-[100px] flex-shrink-0">
+                            {keys}
+                          </span>
+                          <span className="text-[var(--text-secondary)]">
                             {desc}
                           </span>
                         </div>
@@ -2898,7 +2938,7 @@ export default function Dashboard() {
                   </div>
                 ))}
               </div>
-              <p className="text-[11px] text-[var(--text-faint)] font-mono mt-6 text-center">
+              <p className="text-[11px] text-[var(--text-dimmed)] font-mono mt-4 text-center">
                 Press ? or Esc to close
               </p>
             </div>
@@ -2906,7 +2946,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* ━━ STATUS BAR ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */}
+      {/* STATUS BAR */}
       <div className="h-[32px] bg-[var(--bg-secondary)] border-t border-[var(--border)] flex-shrink-0 flex items-center px-4 gap-3">
         <span
           className="font-bold px-2 py-0.5 rounded text-[11px] font-mono"
@@ -2915,7 +2955,7 @@ export default function Dashboard() {
             color: showLinker ? "#8b5cf6" : modeColor,
           }}
         >
-          {showLinker ? "LINK" : vimMode}
+          {showLinker ? "LINK" : vimMode === "VISUAL_LINE" ? "V-LINE" : vimMode}
         </span>
         <span className="text-[var(--border)]">│</span>
         <span className="text-[12px] text-[var(--text-muted)] font-mono flex-1">
@@ -2937,17 +2977,21 @@ export default function Dashboard() {
           {!showLinker &&
             uiFocus === "editor" &&
             vimMode === "NORMAL" &&
-            (pendingKey
-              ? `${pendingKey}…`
+            (pendingKey || countStr
+              ? `${countStr}${pendingKey || ""}…`
               : "Space link · g graph · q close · / search · ? help")}
           {!showLinker &&
             uiFocus === "editor" &&
             vimMode === "INSERT" &&
-            "Typing · ←→↑↓ move · [[ link · Esc → NORMAL"}
+            "Typing · ←→↑↓ move · [[ link · Ctrl+Z undo · Esc → NORMAL"}
           {!showLinker &&
             uiFocus === "editor" &&
             vimMode === "VISUAL" &&
-            "hjkl select · d delete · y yank · c change · Esc cancel"}
+            "hjkl select · d delete · y yank · c change · V line · Esc cancel"}
+          {!showLinker &&
+            uiFocus === "editor" &&
+            vimMode === "VISUAL_LINE" &&
+            "j↓ k↑ select lines · d delete · y yank · c change · > < indent · Esc cancel"}
         </span>
         {statusMsg && (
           <span className="text-[12px] text-[#d29922] font-mono font-medium">
