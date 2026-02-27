@@ -66,6 +66,7 @@ export const HELP_SECTIONS = [
       ["u / Ctrl+Z / Ctrl+R", "Undo / undo / redo"],
       ["v / V", "Visual char / line select"],
       ["Ctrl+A", "Select all (visual line)"],
+      ["Ctrl+C", "Copy to clipboard"],
       ["Ctrl+V", "Paste from clipboard"],
       ["yy / yiw / p / P", "Yank line / word / paste"],
       ["{N}+cmd", "Repeat N times (e.g. 10j, 5dd, d3w)"],

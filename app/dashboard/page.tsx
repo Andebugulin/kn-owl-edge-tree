@@ -644,6 +644,9 @@ export default function Dashboard() {
   // ━━━ KEYBOARD HANDLER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   useEffect(() => {
     const handle = (e: KeyboardEvent) => {
+      // Ignore modifier-only keypresses — prevents Shift from clearing pending state (fixes d$, dW, d{, etc.)
+      if (["Shift", "Control", "Alt", "Meta", "CapsLock"].includes(e.key))
+        return;
       if ((e.metaKey || e.ctrlKey) && e.key === "v" && vimMode === "INSERT")
         return; // let browser handle in INSERT
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
@@ -661,6 +664,45 @@ export default function Dashboard() {
       if ((e.ctrlKey || e.metaKey) && e.key === "a" && uiFocus === "editor") {
         e.preventDefault();
         selectAll(vimCtx);
+        return;
+      }
+      // Ctrl+C copy to system clipboard (works in all editor modes)
+      if ((e.ctrlKey || e.metaKey) && e.key === "c" && uiFocus === "editor") {
+        e.preventDefault();
+        const cur = cursorRef.current;
+        const cl = linesRef.current;
+        let text = "";
+        if (vimMode === "VISUAL_LINE") {
+          const sL = Math.min(visualLineAnchor ?? cur.line, cur.line),
+            eL = Math.max(visualLineAnchor ?? cur.line, cur.line);
+          text = cl.slice(sL, eL + 1).join("\n");
+          setYankReg(text);
+          setYankIsLine(true);
+          setVimMode("NORMAL");
+          setVisualLineAnchor(null);
+          flash("Copied " + (eL - sL + 1) + " lines");
+        } else if (vimMode === "VISUAL" && visualAnchor) {
+          const s = posMin(visualAnchor, cur),
+            ep = posMax(visualAnchor, cur);
+          if (s.line === ep.line) text = cl[s.line].slice(s.col, ep.col + 1);
+          else {
+            const ch = [cl[s.line].slice(s.col)];
+            for (let i = s.line + 1; i < ep.line; i++) ch.push(cl[i]);
+            ch.push(cl[ep.line].slice(0, ep.col + 1));
+            text = ch.join("\n");
+          }
+          setYankReg(text);
+          setYankIsLine(false);
+          setVimMode("NORMAL");
+          setVisualAnchor(null);
+          flash("Copied");
+        } else {
+          text = cl[cur.line] || "";
+          setYankReg(text);
+          setYankIsLine(true);
+          flash("Copied line");
+        }
+        navigator.clipboard.writeText(text).catch(() => {});
         return;
       }
       // Ctrl+V paste from clipboard in NORMAL/VISUAL modes
@@ -1431,8 +1473,9 @@ export default function Dashboard() {
             let c = cur.col;
             const fn = e.key === "e" ? endOfWord : endOfWORD;
             for (let i = 0; i < count; i++) c = fn(cl[cur.line] || "", c);
-            tgtCol = c;
-          } else if (e.key === "{") {
+            tgtCol = c + 1;
+          } // +1 because endOfWord returns last char, slice needs past-end
+          else if (e.key === "{") {
             let ln = cur.line;
             for (let i = 0; i < count; i++) ln = prevParagraph(cl, ln);
             tgtLine = ln;
@@ -1443,7 +1486,7 @@ export default function Dashboard() {
             tgtLine = ln;
             tgtCol = 0;
           } else if (e.key === "$")
-            tgtCol = Math.max(0, (cl[cur.line]?.length ?? 1) - 1);
+            tgtCol = cl[cur.line]?.length ?? 0; // past-end for inclusive delete
           else if (e.key === "^") {
             const f = (cl[cur.line] || "").search(/\S/);
             tgtCol = f >= 0 ? f : 0;
@@ -1510,9 +1553,15 @@ export default function Dashboard() {
                     nl[s.line].slice(0, s.col) + nl[ep.line].slice(ep.col);
                   nl.splice(s.line + 1, ep.line - s.line);
                 }
+                setCursor({
+                  line: s.line,
+                  col: Math.min(
+                    s.col,
+                    Math.max(0, (nl[s.line]?.length ?? 1) - 1)
+                  ),
+                });
                 return nl;
               });
-              setCursor(s);
             } else if (pendingKey === "y") {
               const cl2 = linesRef.current;
               if (s.line === ep.line) {
@@ -1543,9 +1592,9 @@ export default function Dashboard() {
                   nl.splice(s.line + 1, ep.line - s.line);
                 }
                 setYankIsLine(false);
+                setCursor({ line: s.line, col: s.col });
                 return nl;
               });
-              setCursor(s);
               setVimMode("INSERT");
             }
           }
@@ -2114,7 +2163,7 @@ export default function Dashboard() {
           <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-muted)]">
             {isCurLine ? lineNum : relNum || lineNum}
           </span>
-          <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] bg-[#79c0ff]/20">
+          <span className="flex-1 min-w-0 whitespace-pre-wrap break-words font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] bg-[#79c0ff]/20">
             {chars.length === 0 ? (
               isCurLine ? (
                 <span className="ed-cursor-block">&nbsp;</span>
@@ -2148,7 +2197,7 @@ export default function Dashboard() {
           <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-muted)]">
             {lineNum}
           </span>
-          <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
+          <span className="flex-1 min-w-0 whitespace-pre-wrap break-words font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
             {chars.length === 0 ? (
               vimMode === "INSERT" ? (
                 <span className="ed-cursor-line" />
@@ -2214,7 +2263,7 @@ export default function Dashboard() {
             <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-faint)]">
               {relNum || lineNum}
             </span>
-            <span className="flex-1 whitespace-pre font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
+            <span className="flex-1 min-w-0 whitespace-pre-wrap break-words font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
               {chars.length === 0 ? (
                 <span className="bg-[#79c0ff]/20 inline-block w-2 h-[22px]" />
               ) : (
@@ -2250,7 +2299,7 @@ export default function Dashboard() {
           {relNum || lineNum}
         </span>
         <div
-          className={`flex-1 font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] ${
+          className={`flex-1 min-w-0 font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] break-words ${
             fmt.className || ""
           }`}
         >
@@ -2537,7 +2586,7 @@ export default function Dashboard() {
                     if (uiFocus !== "editor") setUIFocus("editor");
                   }}
                 >
-                  <div className="max-w-3xl">
+                  <div className="w-full overflow-hidden">
                     {lines.map((l, i) => renderEditorLine(l, i))}
                     <div className="h-48" />
                   </div>
