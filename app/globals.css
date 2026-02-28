@@ -8,6 +8,8 @@
   --bg-hover: #161b22;
   --bg-editor-line: #12151e;
   --bg-input: #010409;
+  --bg-link-active: #314b4b;
+  --bg-link-selection: #280e28;
   --border: #21262d;
   --border-active: #30363d;
   --text-primary: #e6edf3;
@@ -42,6 +44,8 @@
   --bg-hover: #e6e8ec;
   --bg-editor-line: #eef0f3;
   --bg-input: #f5f6f8;
+  --bg-link-active: #93acac;
+  --bg-link-selection: #c7c2e3;
   --border: #d8dae0;
   --border-active: #c5c8ce;
   --text-primary: #1a1c20;

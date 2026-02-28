@@ -27,10 +27,10 @@ export const EDGE_COLORS: Record<string, string> = {
 };
 
 export const EDGE_COLORS_BRIGHT: Record<string, string> = {
-  parent: "#FF6B9D",
-  reference: "#7ee787",
-  example: "#79c0ff",
-  contradiction: "#d29922",
+  parent: "var(--red)",
+  reference: "var(--green)",
+  example: "var(--blue)",
+  contradiction: "var(--yellow)",
 };
 
 // ━━━ Help Sections ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

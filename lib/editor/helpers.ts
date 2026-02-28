@@ -26,10 +26,14 @@ export function wouldCreateCircle(
   toId: string,
   nodes: Node[]
 ): boolean {
+  // Adding edge: fromId becomes parent of toId.
+  // Cycle if fromId is already a descendant of toId (toId is ancestor of fromId).
+  // Walk UP from fromId; if we reach toId, it's a cycle.
+  if (fromId === toId) return true;
   const vis = new Set<string>();
   const go = (id: string): boolean => {
     if (vis.has(id)) return false;
-    if (id === fromId) return true;
+    if (id === toId) return true;
     vis.add(id);
     const n = nodes.find((x) => x.id === id);
     if (n)
@@ -37,7 +41,7 @@ export function wouldCreateCircle(
         if (e.type === "parent" && go(e.fromNodeId)) return true;
     return false;
   };
-  return go(toId);
+  return go(fromId);
 }
 
 // ━━━ Cursor ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

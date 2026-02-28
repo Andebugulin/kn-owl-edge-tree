@@ -356,6 +356,79 @@ export default function Dashboard() {
       ...selectedNode.edgesTo.map((e) => ({ ...e, dir: "in" as const })),
     ];
   }, [selectedNode]);
+  // ★ Tree-sorted flat list — groups nodes by tree structure, depth-first
+  // Special nodes (ref/example/contradiction) appear right after their parent node
+  const treeSorted = useMemo((): Array<{
+    node: Node;
+    depth: number;
+    specialType?: string;
+  }> => {
+    if (!nodes) return [];
+    const childrenOf = new Map<string, string[]>();
+    const childSet = new Set<string>();
+    // Track which nodes are special (toNode of a ref/example/contradiction edge)
+    const specialNodeIds = new Set<string>();
+    nodes.forEach((n) => {
+      n.edgesFrom.forEach((e) => {
+        if (e.type === "parent") {
+          childSet.add(e.toNodeId);
+          const arr = childrenOf.get(n.id) || [];
+          arr.push(e.toNodeId);
+          childrenOf.set(n.id, arr);
+        } else {
+          specialNodeIds.add(e.toNodeId);
+        }
+      });
+    });
+    const result: Array<{ node: Node; depth: number; specialType?: string }> =
+      [];
+    const visited = new Set<string>();
+    const visit = (id: string, d: number) => {
+      if (visited.has(id)) return;
+      visited.add(id);
+      const n = nodes.find((x) => x.id === id);
+      if (!n) return;
+      result.push({ node: n, depth: d });
+      // Insert special nodes (ref/example/contradiction) right after this node
+      n.edgesFrom
+        .filter((e) => e.type !== "parent")
+        .forEach((e) => {
+          if (visited.has(e.toNodeId)) return;
+          visited.add(e.toNodeId);
+          const sn = nodes.find((x) => x.id === e.toNodeId);
+          if (!sn) return;
+          result.push({ node: sn, depth: d + 1, specialType: e.type });
+        });
+      (childrenOf.get(id) || []).forEach((cid) => visit(cid, d + 1));
+    };
+    // Roots first, then orphans (excluding special nodes)
+    nodes
+      .filter(
+        (n) =>
+          !childSet.has(n.id) &&
+          !specialNodeIds.has(n.id) &&
+          childrenOf.has(n.id)
+      )
+      .sort((a, b) => a.title.localeCompare(b.title))
+      .forEach((n) => visit(n.id, 0));
+    nodes
+      .filter(
+        (n) =>
+          !childSet.has(n.id) &&
+          !specialNodeIds.has(n.id) &&
+          !childrenOf.has(n.id)
+      )
+      .sort(
+        (a, b) =>
+          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      )
+      .forEach((n) => visit(n.id, 0));
+    nodes.forEach((n) => {
+      if (!visited.has(n.id)) visit(n.id, 0);
+    }); // safety net
+    return result;
+  }, [nodes]);
+
   const linkCandidates = useMemo(() => {
     if (!selectedNodeId || !nodes) return [];
     const src = nodes.find((n) => n.id === selectedNodeId);
@@ -364,7 +437,35 @@ export default function Dashboard() {
       ...src.edgesFrom.map((e) => e.toNodeId),
       ...src.edgesTo.map((e) => e.fromNodeId),
     ]);
-    let c = nodes.filter((n) => n.id !== selectedNodeId && !linked.has(n.id));
+    const lt = LINK_TYPES[linkTypeIdx].type;
+    const srcHasParent = src.edgesTo.some((e) => e.type === "parent");
+    const srcIsSpecial = src.edgesTo.some((e) =>
+      ["reference", "example", "contradiction"].includes(e.type)
+    );
+    const srcIsolated = src.edgesFrom.length === 0 && src.edgesTo.length === 0;
+    let c = nodes.filter((n) => {
+      if (n.id === selectedNodeId || linked.has(n.id)) return false;
+      const tgtIsSpecial = n.edgesTo.some((e) =>
+        ["reference", "example", "contradiction"].includes(e.type)
+      );
+      if (lt === "parent" || lt === "child") {
+        // Special nodes are locked — no parent/child allowed
+        if (srcIsSpecial || tgtIsSpecial) return false;
+        if (lt === "parent") {
+          if (srcHasParent) return false;
+          if (wouldCreateCircle(n.id, selectedNodeId, nodes)) return false;
+        } else {
+          if (n.edgesTo.some((e) => e.type === "parent")) return false;
+          if (wouldCreateCircle(selectedNodeId, n.id, nodes)) return false;
+        }
+      } else {
+        // reference/example/contradiction: exactly one must be isolated
+        const tgtIsolated = n.edgesFrom.length === 0 && n.edgesTo.length === 0;
+        if (srcIsolated && tgtIsolated) return false;
+        if (!srcIsolated && !tgtIsolated) return false;
+      }
+      return true;
+    });
     if (linkSearch) {
       const q = linkSearch.toLowerCase();
       c = c.filter(
@@ -373,8 +474,8 @@ export default function Dashboard() {
           n.content.toLowerCase().includes(q)
       );
     }
-    return c.slice(0, 20);
-  }, [selectedNodeId, nodes, linkSearch]);
+    return c.slice(0, 30);
+  }, [selectedNodeId, nodes, linkSearch, linkTypeIdx]);
   const searchResults = useMemo(() => {
     if (!searchQuery.trim() || !sortedNodes.length) return [];
     const q = searchQuery.toLowerCase();
@@ -430,10 +531,10 @@ export default function Dashboard() {
       setVisualLineAnchor(null);
       setUndoStack([]);
       setRedoStack([]);
-      const idx = sortedNodes.findIndex((n) => n.id === nodeId);
+      const idx = treeSorted.findIndex((s) => s.node.id === nodeId);
       if (idx >= 0) setListIdx(idx);
     },
-    [nodes, sortedNodes, selectedNodeId, updateNode]
+    [nodes, treeSorted, selectedNodeId, updateNode]
   );
 
   const validateAndLink = useCallback(
@@ -443,55 +544,65 @@ export default function Dashboard() {
         tgt = nodes.find((n) => n.id === targetId)!;
       if (!src || !tgt) return;
       const lt = LINK_TYPES[linkTypeIdx].type;
-      if (
-        src.edgesTo.some((e) =>
-          ["reference", "example", "contradiction"].includes(e.type)
-        )
-      ) {
-        flash("Source is special node");
-        return;
-      }
-      if (
-        tgt.edgesTo.some((e) =>
-          ["reference", "example", "contradiction"].includes(e.type)
-        )
-      ) {
-        flash("Target is special node");
-        return;
-      }
+      const srcIsSpecial = src.edgesTo.some((e) =>
+        ["reference", "example", "contradiction"].includes(e.type)
+      );
+      const tgtIsSpecial = tgt.edgesTo.some((e) =>
+        ["reference", "example", "contradiction"].includes(e.type)
+      );
       let from = selectedNodeId,
         to = targetId,
         et: string = lt;
       if (lt === "parent" || lt === "child") {
-        const check = lt === "parent" ? src : tgt;
-        if (check.edgesTo.some((e) => e.type === "parent")) {
-          flash("Already has parent");
+        if (srcIsSpecial || tgtIsSpecial) {
+          flash("Special nodes can't have parent/child");
           return;
         }
-        if (
-          wouldCreateCircle(
-            lt === "parent" ? targetId : selectedNodeId,
-            lt === "parent" ? selectedNodeId : targetId,
-            nodes
-          )
-        ) {
-          flash("Would create cycle");
-          return;
+        if (lt === "parent") {
+          if (src.edgesTo.some((e) => e.type === "parent")) {
+            flash("Already has a parent");
+            return;
+          }
+          if (wouldCreateCircle(targetId, selectedNodeId, nodes)) {
+            flash("Would create cycle");
+            return;
+          }
+          from = targetId;
+          to = selectedNodeId;
+          et = "parent";
+        } else {
+          if (tgt.edgesTo.some((e) => e.type === "parent")) {
+            flash("Target already has a parent");
+            return;
+          }
+          if (wouldCreateCircle(selectedNodeId, targetId, nodes)) {
+            flash("Would create cycle");
+            return;
+          }
+          from = selectedNodeId;
+          to = targetId;
+          et = "parent";
         }
-        if (lt === "parent") [from, to] = [to, from];
-        et = "parent";
       } else {
-        const sI =
-          !src.edgesFrom.some((e) => e.type === "parent") &&
-          !src.edgesTo.some((e) => e.type === "parent");
-        const tI =
-          !tgt.edgesFrom.some((e) => e.type === "parent") &&
-          !tgt.edgesTo.some((e) => e.type === "parent");
-        if (!sI && !tI) {
+        const srcIsolated =
+          src.edgesFrom.length === 0 && src.edgesTo.length === 0;
+        const tgtIsolated =
+          tgt.edgesFrom.length === 0 && tgt.edgesTo.length === 0;
+        if (!srcIsolated && !tgtIsolated) {
           flash("One node must be isolated");
           return;
         }
-        if (sI && !tI) [from, to] = [to, from];
+        if (srcIsolated && tgtIsolated) {
+          flash("One node must be in a tree");
+          return;
+        }
+        if (srcIsolated) {
+          from = targetId;
+          to = selectedNodeId;
+        } else {
+          from = selectedNodeId;
+          to = targetId;
+        }
       }
       createEdge.mutate({
         fromNodeId: from,
@@ -954,9 +1065,12 @@ export default function Dashboard() {
         if (pendingKey === "d" && e.key === "d") {
           e.preventDefault();
           setPendingKey(null);
-          const n = sortedNodes[listIdx];
-          if (n && confirm(`Delete "${n.title}" and all its connections?`)) {
-            deleteNode.mutate({ id: n.id });
+          const item = treeSorted[listIdx];
+          if (
+            item &&
+            confirm(`Delete "${item.node.title}" and all its connections?`)
+          ) {
+            deleteNode.mutate({ id: item.node.id });
             flash("Deleted");
             setListIdx((i) => Math.max(0, i - 1));
           }
@@ -972,7 +1086,7 @@ export default function Dashboard() {
         }
         if (e.key === "j") {
           e.preventDefault();
-          setListIdx((i) => Math.min(i + 1, sortedNodes.length - 1));
+          setListIdx((i) => Math.min(i + 1, treeSorted.length - 1));
           return;
         }
         if (e.key === "k") {
@@ -982,8 +1096,8 @@ export default function Dashboard() {
         }
         if (e.key === "l" || e.key === "Enter") {
           e.preventDefault();
-          if (sortedNodes[listIdx]) {
-            selectNode(sortedNodes[listIdx].id);
+          if (treeSorted[listIdx]) {
+            selectNode(treeSorted[listIdx].node.id);
             setUIFocus("editor");
           }
           return;
@@ -1553,15 +1667,9 @@ export default function Dashboard() {
                     nl[s.line].slice(0, s.col) + nl[ep.line].slice(ep.col);
                   nl.splice(s.line + 1, ep.line - s.line);
                 }
-                setCursor({
-                  line: s.line,
-                  col: Math.min(
-                    s.col,
-                    Math.max(0, (nl[s.line]?.length ?? 1) - 1)
-                  ),
-                });
                 return nl;
               });
+              setCursor(s);
             } else if (pendingKey === "y") {
               const cl2 = linesRef.current;
               if (s.line === ep.line) {
@@ -1592,9 +1700,9 @@ export default function Dashboard() {
                   nl.splice(s.line + 1, ep.line - s.line);
                 }
                 setYankIsLine(false);
-                setCursor({ line: s.line, col: s.col });
                 return nl;
               });
+              setCursor(s);
               setVimMode("INSERT");
             }
           }
@@ -2093,6 +2201,7 @@ export default function Dashboard() {
     countStr,
     listIdx,
     sortedNodes,
+    treeSorted,
     selectedNodeId,
     showSearch,
     searchResults,
@@ -2135,12 +2244,12 @@ export default function Dashboard() {
 
   const modeColor =
     vimMode === "NORMAL"
-      ? "#7ee787"
+      ? "var(--green)"
       : vimMode === "INSERT"
-      ? "#d29922"
+      ? "var(--yellow)"
       : vimMode === "VISUAL"
-      ? "#79c0ff"
-      : "#c084fc";
+      ? "var(--blue)"
+      : "var(--accent)";
 
   function renderEditorLine(lineText: string, lineIdx: number) {
     const isCurLine =
@@ -2158,12 +2267,12 @@ export default function Dashboard() {
         <div
           key={lineIdx}
           id={`ed-line-${lineIdx}`}
-          className="ed-line flex items-start bg-[#79c0ff]/10"
+          className="ed-line flex items-start bg-[var(--selection)]"
         >
           <span className="ed-gutter select-none flex-shrink-0 w-[44px] text-right pr-3 text-[12px] leading-[22px] text-[var(--text-muted)]">
             {isCurLine ? lineNum : relNum || lineNum}
           </span>
-          <span className="flex-1 min-w-0 whitespace-pre-wrap break-words font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] bg-[#79c0ff]/20">
+          <span className="flex-1 min-w-0 whitespace-pre-wrap break-words font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] bg-[var(--selection)]">
             {chars.length === 0 ? (
               isCurLine ? (
                 <span className="ed-cursor-block">&nbsp;</span>
@@ -2234,7 +2343,7 @@ export default function Dashboard() {
                   );
                 if (isSelected(visualAnchor, cursor, lineIdx, ci))
                   return (
-                    <span key={ci} className="bg-[#79c0ff]/20">
+                    <span key={ci} className="bg-[var(--selection)]">
                       {ch}
                     </span>
                   );
@@ -2265,14 +2374,14 @@ export default function Dashboard() {
             </span>
             <span className="flex-1 min-w-0 whitespace-pre-wrap break-words font-mono text-[14px] leading-[22px] text-[var(--text-secondary)]">
               {chars.length === 0 ? (
-                <span className="bg-[#79c0ff]/20 inline-block w-2 h-[22px]" />
+                <span className="bg-[var(--selection)] inline-block w-2 h-[22px]" />
               ) : (
                 chars.map((ch, ci) => (
                   <span
                     key={ci}
                     className={
                       isSelected(visualAnchor, cursor, lineIdx, ci)
-                        ? "bg-[#79c0ff]/20"
+                        ? "bg-[var(--selection)]"
                         : ""
                     }
                   >
@@ -2316,7 +2425,7 @@ export default function Dashboard() {
       }`}
     >
       {linkerFocus === section && (
-        <span className="w-1.5 h-1.5 rounded-full bg-[#7ee787]" />
+        <span className="w-1.5 h-1.5 rounded-full bg-[var(--green)]" />
       )}
       <span className="text-[11px] text-[var(--text-dimmed)] font-mono uppercase tracking-wider">
         {label}
@@ -2329,7 +2438,7 @@ export default function Dashboard() {
       {/* HEADER */}
       <header className="bg-[var(--bg-secondary)] border-b border-[var(--border)] flex-shrink-0 h-11 flex items-center px-4 gap-3">
         <div className="flex items-center gap-3 flex-shrink-0">
-          <span className="text-[#8b5cf6] text-[16px]">◆</span>
+          <span className="text-[var(--accent)] text-[16px]">◆</span>
           <span className="text-[14px] font-semibold text-[var(--text-primary)] tracking-tight">
             Knowledge Tree
           </span>
@@ -2402,7 +2511,7 @@ export default function Dashboard() {
         <div className="bg-[var(--bg-secondary)] border-b border-[var(--border)] flex-shrink-0">
           <div className="max-w-lg mx-auto px-4 py-2">
             <div className="relative">
-              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#79c0ff] text-[13px] font-mono">
+              <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--blue)] text-[13px] font-mono">
                 /
               </span>
               <input
@@ -2415,7 +2524,7 @@ export default function Dashboard() {
                 }}
                 placeholder="search…"
                 autoFocus
-                className="w-full pl-7 pr-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-active)] rounded text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-dimmed)] focus:border-[#79c0ff]/50 focus:outline-none"
+                className="w-full pl-7 pr-3 py-1.5 bg-[var(--bg-primary)] border border-[var(--border-active)] rounded text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-dimmed)] focus:border-[var(--blue)]/50 focus:outline-none"
               />
             </div>
             {searchResults.length > 0 && (
@@ -2432,7 +2541,7 @@ export default function Dashboard() {
                     }}
                     className={`w-full text-left px-3 py-1.5 text-[13px] font-mono flex items-center gap-2 ${
                       i === searchIdx
-                        ? "bg-[#da3633]/15 text-[var(--text-primary)]"
+                        ? "bg-[var(--selection)] text-[var(--text-primary)]"
                         : "text-[var(--text-secondary)] hover:bg-[var(--bg-active)]"
                     }`}
                   >
@@ -2456,7 +2565,7 @@ export default function Dashboard() {
               } h-full border-r border-[var(--border)] flex flex-col bg-[var(--bg-primary)] relative`}
             >
               {uiFocus === "list" && (
-                <div className="absolute top-0 left-0 right-0 h-[2px] bg-[#7ee787] z-10" />
+                <div className="absolute top-0 left-0 right-0 h-[2px] bg-[var(--green)] z-10" />
               )}
               <div className="flex-shrink-0 p-2 border-b border-[var(--border)]">
                 <button
@@ -2466,14 +2575,14 @@ export default function Dashboard() {
                   }}
                   className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 bg-[var(--bg-secondary)] hover:bg-[var(--bg-primary)] border border-[var(--border-active)] text-[var(--text-secondary)] rounded text-[11px] font-mono"
                 >
-                  <span className="text-[#7ee787]">+</span>new
+                  <span className="text-[var(--green)]">+</span>new
                   <kbd className="text-[10px] text-[var(--text-dimmed)] ml-1">
                     n
                   </kbd>
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto custom-scrollbar">
-                {sortedNodes.length === 0 ? (
+                {treeSorted.length === 0 ? (
                   <div className="flex items-center justify-center h-full">
                     <p className="text-[var(--text-dimmed)] text-[12px] font-mono">
                       press n to create first node
@@ -2481,49 +2590,60 @@ export default function Dashboard() {
                   </div>
                 ) : (
                   <div className="py-px">
-                    {sortedNodes.map((node, idx) => {
-                      const isActive = node.id === selectedNodeId;
+                    {treeSorted.map((item, idx) => {
+                      const isActive = item.node.id === selectedNodeId;
                       const isCur = idx === listIdx && uiFocus === "list";
                       return (
                         <div
-                          key={node.id}
+                          key={item.node.id}
                           onClick={() => {
-                            selectNode(node.id);
+                            selectNode(item.node.id);
                             setListIdx(idx);
                             setUIFocus("editor");
                           }}
-                          className={`px-3 py-2 cursor-pointer transition-all duration-75 border-l-[3px] ${
+                          className={`flex items-center gap-1.5 cursor-pointer transition-all duration-75 border-l-[3px] pr-2 py-1.5 ${
                             isActive
-                              ? "bg-[var(--bg-tertiary)] border-l-[#8b5cf6]"
+                              ? "bg-[var(--bg-tertiary)] border-l-[var(--accent)]"
                               : isCur
-                              ? "bg-[#7ee787]/10 border-l-[#7ee787]"
+                              ? "bg-[var(--selection)] border-l-[var(--green)]"
                               : "border-l-transparent hover:bg-[var(--bg-tertiary)]/30"
                           }`}
+                          style={{ paddingLeft: `${8 + item.depth * 12}px` }}
                         >
-                          <div className="flex items-center gap-2">
+                          {item.specialType ? (
+                            <span
+                              className="text-[9px] font-mono font-medium flex-shrink-0 px-1 rounded"
+                              style={{
+                                color:
+                                  EDGE_COLORS_BRIGHT[item.specialType] ||
+                                  "var(--text-faint)",
+                              }}
+                            >
+                              {item.specialType.slice(0, 3)}
+                            </span>
+                          ) : (
                             <span
                               className="w-[5px] h-[5px] rounded-full flex-shrink-0"
-                              style={{ backgroundColor: getNodeColor(node) }}
+                              style={{
+                                backgroundColor: getNodeColor(item.node),
+                              }}
                             />
-                            <span
-                              className={`text-[12px] font-mono truncate ${
-                                isActive || isCur
-                                  ? "text-[var(--text-primary)]"
-                                  : "text-[var(--text-secondary)]"
-                              }`}
-                            >
-                              {node.title}
+                          )}
+                          <span
+                            className={`text-[12px] font-mono truncate flex-1 ${
+                              isActive || isCur
+                                ? "text-[var(--text-primary)]"
+                                : item.specialType
+                                ? "text-[var(--text-muted)]"
+                                : "text-[var(--text-secondary)]"
+                            }`}
+                          >
+                            {item.node.title}
+                          </span>
+                          {isCur && (
+                            <span className="text-[9px] text-[var(--green)] font-mono flex-shrink-0">
+                              ▸
                             </span>
-                            {isCur && (
-                              <span className="text-[9px] text-[#7ee787] font-mono ml-auto flex-shrink-0">
-                                ▸
-                              </span>
-                            )}
-                          </div>
-                          {!selectedNodeId && node.content && (
-                            <p className="text-[11px] text-[var(--text-dimmed)] mt-0.5 ml-[13px] truncate font-mono">
-                              {node.content.slice(0, 80)}
-                            </p>
                           )}
                         </div>
                       );
@@ -2555,7 +2675,8 @@ export default function Dashboard() {
                             className="w-[4px] h-[4px] rounded-full"
                             style={{
                               backgroundColor:
-                                EDGE_COLORS_BRIGHT[c.type] || "#7d8590",
+                                EDGE_COLORS_BRIGHT[c.type] ||
+                                "var(--text-faint)",
                             }}
                           />
                           <span
@@ -2570,7 +2691,7 @@ export default function Dashboard() {
                           </span>
                           <button
                             onClick={() => deleteEdge.mutate({ id: c.id })}
-                            className="text-[var(--text-dimmed)] hover:text-[#f85149] opacity-0 group-hover:opacity-100"
+                            className="text-[var(--text-dimmed)] hover:text-[var(--red)] opacity-0 group-hover:opacity-100"
                           >
                             ×
                           </button>
@@ -2679,214 +2800,249 @@ export default function Dashboard() {
       {/* LINKER */}
       {showLinker && selectedNode && (
         <div
-          className="fixed inset-0 z-50 flex flex-col items-center justify-center"
+          className="fixed inset-0 z-50 flex items-center justify-center p-6"
           onClick={(e) => {
             if (e.target === e.currentTarget) setShowLinker(false);
           }}
         >
           <div className="absolute inset-0 bg-[var(--bg-input)]/70 backdrop-blur-[3px]" />
-          <div className="relative z-10 mb-4 w-full max-w-2xl">
-            <div className="bg-[var(--bg-secondary)]/90 backdrop-blur-2xl border border-[var(--border-active)]/40 rounded-2xl px-6 py-5 shadow-[0_8px_32px_rgba(0,0,0,0.5)]">
-              <div className="flex items-center gap-2 mb-3">
-                <span className="w-2 h-2 rounded-full bg-[#8b5cf6]" />
-                <span className="text-[12px] text-[var(--text-muted)] font-mono uppercase tracking-widest">
-                  Tree Preview
+          <div className="relative z-10 w-full max-w-4xl max-h-[80vh] bg-[var(--bg-secondary)] border border-[var(--border-active)]/40 rounded-2xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] flex overflow-hidden">
+            {/* LEFT — Tree */}
+            <div className="w-[340px] flex-shrink-0 border-r border-[var(--border)] flex flex-col bg-[var(--bg-primary)]/50">
+              <div className="flex items-center gap-2 px-4 py-3 border-b border-[var(--border)]">
+                <span className="w-2 h-2 rounded-full bg-[var(--accent)]" />
+                <span className="text-[11px] text-[var(--text-muted)] font-mono uppercase tracking-widest">
+                  Tree
                 </span>
               </div>
-              {treeLines.length > 0 ? (
-                <div className="space-y-[3px]">
-                  {treeLines.map((tl, i) => {
-                    const gc = tl.ghostEdgeType
-                      ? EDGE_COLORS_BRIGHT[tl.ghostEdgeType] ||
-                        EDGE_COLORS_BRIGHT.parent
-                      : undefined;
-                    return (
-                      <div
-                        key={i}
-                        className={`flex items-center font-mono text-[14px] leading-[26px] transition-all duration-150 ${
-                          tl.isGhost ? "opacity-70" : ""
-                        }`}
-                        style={{ paddingLeft: `${tl.indent * 26}px` }}
-                      >
-                        <span
-                          className="mr-2.5 flex-shrink-0 text-[13px]"
-                          style={{
-                            color: tl.edgeType
-                              ? EDGE_COLORS_BRIGHT[tl.edgeType]
-                              : gc || "#6e7681",
-                          }}
+              <div className="flex-1 overflow-y-auto custom-scrollbar px-3 py-2">
+                {treeLines.length > 0 ? (
+                  <div className="space-y-[1px]">
+                    {treeLines.map((tl, i) => {
+                      const gc = tl.ghostEdgeType
+                        ? EDGE_COLORS_BRIGHT[tl.ghostEdgeType] ||
+                          EDGE_COLORS_BRIGHT.parent
+                        : undefined;
+                      const edgeColor = tl.edgeType
+                        ? EDGE_COLORS_BRIGHT[tl.edgeType]
+                        : gc || "var(--text-faint)";
+                      return (
+                        <div
+                          key={i}
+                          className={`flex items-center font-mono text-[12px] leading-[22px] transition-all duration-100 rounded-md ${
+                            tl.isGhost ? "opacity-60" : ""
+                          } ${tl.isCurrent ? "bg-[var(--selection)]" : ""}`}
                         >
-                          {tl.connector}
-                        </span>
-                        <span
-                          className={
-                            tl.isGhost
-                              ? "px-2.5 py-1 rounded-md border border-dashed text-[13px]"
-                              : tl.isCurrent
-                              ? "text-[var(--text-primary)] font-bold bg-[var(--bg-input)] px-2.5 py-1 rounded-md ring-1 ring-[#8b5cf6]/40"
-                              : "text-[var(--text-primary)] py-1"
-                          }
-                          style={
-                            tl.isGhost
-                              ? {
-                                  borderColor: (gc || "#6e7681") + "60",
-                                  color: gc,
-                                  backgroundColor: (gc || "#6e7681") + "10",
-                                }
-                              : tl.edgeType
-                              ? { color: EDGE_COLORS_BRIGHT[tl.edgeType] }
-                              : undefined
-                          }
-                        >
-                          {tl.label}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="text-[var(--text-dimmed)] text-[13px] font-mono">
-                  No tree structure
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="relative z-10 w-full max-w-md bg-[var(--bg-secondary)] border border-[var(--border-active)] rounded-xl shadow-2xl overflow-hidden max-h-[50vh] flex flex-col">
-            {allConns.length > 0 && (
-              <div
-                className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
-                  linkerFocus === "conns" ? "bg-[var(--bg-input)]/60" : ""
-                }`}
-              >
-                {sectionIndicator("conns", "Connections")}
-                <div className="space-y-1">
-                  {allConns.map((c, idx) => {
-                    const tid = c.dir === "out" ? c.toNodeId : c.fromNodeId;
-                    const focused = linkerFocus === "conns" && connIdx === idx;
-                    return (
-                      <div
-                        key={c.id}
-                        className={`flex items-center gap-2.5 text-[13px] font-mono px-3 py-2 rounded-lg transition-all duration-75 ${
-                          focused
-                            ? "bg-[var(--bg-secondary)] ring-1 ring-[#f85149]/40"
-                            : "hover:bg-[var(--bg-tertiary)]/50"
-                        }`}
-                      >
-                        <span
-                          className="w-[6px] h-[6px] rounded-full flex-shrink-0"
-                          style={{
-                            backgroundColor:
-                              EDGE_COLORS_BRIGHT[c.type] || "#7d8590",
-                          }}
-                        />
-                        <span className="text-[var(--text-muted)] text-[12px] w-[60px] flex-shrink-0">
-                          {c.type}
-                        </span>
-                        <span className="text-[var(--text-primary)] truncate flex-1">
-                          {getNodeTitle(tid)}
-                        </span>
-                        {focused && (
-                          <span className="text-[11px] text-[#f85149] flex-shrink-0 font-medium">
-                            d:unlink
+                          <span
+                            className="flex-shrink-0 whitespace-pre text-[11px]"
+                            style={{ color: edgeColor }}
+                          >
+                            {tl.prefix}
                           </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-            <div
-              className={`px-5 py-3 border-b border-[var(--border)] transition-colors ${
-                linkerFocus === "type" ? "bg-[var(--bg-input)]/60" : ""
-              }`}
-            >
-              {sectionIndicator("type", "Link Type")}
-              <div className="flex gap-2">
-                {LINK_TYPES.map((lt, idx) => (
-                  <button
-                    key={lt.type}
-                    onClick={() => setLinkTypeIdx(idx)}
-                    className={`flex-1 py-2.5 rounded-lg text-[13px] font-mono font-medium transition-all duration-75 flex flex-col items-center gap-1 border ${
-                      linkTypeIdx === idx
-                        ? "text-[var(--text-primary)] font-bold"
-                        : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-primary)] border-[var(--border)]"
-                    }`}
-                    style={
-                      linkTypeIdx === idx
-                        ? {
-                            backgroundColor: lt.color + "25",
-                            borderColor: lt.color + "80",
-                          }
-                        : undefined
-                    }
-                  >
-                    <span className="text-[16px]">{lt.icon}</span>
-                    <span>{lt.label}</span>
-                  </button>
-                ))}
-              </div>
-              {linkerFocus === "type" && (
-                <p className="text-[11px] text-[var(--text-muted)] font-mono mt-2 text-center">
-                  ← h / l → change type · ↓ j candidates · ↑ k connections
-                </p>
-              )}
-            </div>
-            <div
-              className={`px-5 py-3 transition-colors ${
-                linkerFocus === "candidates" || linkerFocus === "filter"
-                  ? "bg-[var(--bg-input)]/60"
-                  : ""
-              }`}
-            >
-              {sectionIndicator("candidates", "Candidates")}
-              <div className="mb-2.5">
-                <div className="relative">
-                  <span className="absolute left-3 top-1/2 -translate-y-1/2 text-[12px] text-[var(--text-muted)] font-mono">
-                    f/
-                  </span>
-                  <input
-                    ref={linkSearchRef}
-                    type="text"
-                    value={linkSearch}
-                    onChange={(e) => {
-                      setLinkSearch(e.target.value);
-                      setLinkCandIdx(0);
-                    }}
-                    onFocus={() => setLinkerFocus("filter")}
-                    placeholder="filter nodes…"
-                    className={`w-full pl-8 pr-3 py-2 bg-[var(--bg-input)] border rounded-lg text-[13px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none transition-colors ${
-                      linkerFocus === "filter"
-                        ? "border-[#7ee787]/50"
-                        : "border-[var(--border)]"
-                    }`}
-                  />
-                </div>
-              </div>
-              <div className="overflow-y-auto max-h-[200px] custom-scrollbar space-y-0.5">
-                {linkCandidates.length > 0 ? (
-                  linkCandidates.map((n, idx) => (
-                    <button
-                      key={n.id}
-                      onClick={() => validateAndLink(n.id)}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-[13px] font-mono transition-all duration-75 flex items-center gap-2.5 ${
-                        linkerFocus === "candidates" && linkCandIdx === idx
-                          ? "bg-[var(--bg-secondary)] ring-1 ring-[#7ee787]/40 text-[var(--text-primary)]"
-                          : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/50"
-                      }`}
-                    >
-                      <span
-                        className="w-[6px] h-[6px] rounded-full flex-shrink-0"
-                        style={{ backgroundColor: getNodeColor(n) }}
-                      />
-                      <span className="truncate">{n.title}</span>
-                    </button>
-                  ))
+                          {tl.isCurrent ? (
+                            <span className="text-[var(--text-primary)] font-bold truncate flex items-center gap-1.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-[var(--accent)] flex-shrink-0" />
+                              {tl.label}
+                            </span>
+                          ) : tl.isGhost ? (
+                            <span
+                              className="truncate px-1.5 py-0.5 rounded border border-dashed text-[11px] flex items-center gap-1"
+                              style={{
+                                borderColor: "var(--border-active)",
+                                color: gc || "var(--text-muted)",
+                                backgroundColor: "var(--bg-active)",
+                              }}
+                            >
+                              {tl.label}
+                              {tl.edgeType && (
+                                <span className="text-[8px] opacity-70">
+                                  {tl.edgeType}
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span
+                              className="truncate flex items-center gap-1"
+                              style={
+                                tl.edgeType
+                                  ? { color: EDGE_COLORS_BRIGHT[tl.edgeType] }
+                                  : { color: "var(--text-secondary)" }
+                              }
+                            >
+                              {tl.label}
+                              {tl.edgeType && (
+                                <span
+                                  className="text-[9px] px-1 rounded-sm flex-shrink-0 font-medium"
+                                  style={{
+                                    backgroundColor: "var(--bg-active)",
+                                    color: EDGE_COLORS_BRIGHT[tl.edgeType],
+                                  }}
+                                >
+                                  {tl.direction === "in" ? "←" : "→"}
+                                  {tl.edgeType}
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : (
-                  <p className="text-[var(--text-dimmed)] text-[12px] font-mono text-center py-3">
-                    {linkSearch ? "no matches" : "no candidates"}
+                  <p className="text-[var(--text-dimmed)] text-[12px] font-mono text-center py-8">
+                    No tree structure yet
                   </p>
                 )}
+              </div>
+            </div>
+
+            {/* RIGHT — Controls */}
+            <div className="flex-1 flex flex-col min-w-0">
+              {/* Connections */}
+              {allConns.length > 0 && (
+                <div
+                  className={`px-4 py-2.5 border-b border-[var(--border)] transition-colors ${
+                    linkerFocus === "conns"
+                      ? "bg-[var(--bg-link-active)]/40"
+                      : ""
+                  }`}
+                >
+                  {sectionIndicator("conns", "Connections")}
+                  <div className="space-y-0.5 max-h-[120px] overflow-y-auto custom-scrollbar">
+                    {allConns.map((c, idx) => {
+                      const tid = c.dir === "out" ? c.toNodeId : c.fromNodeId;
+                      const focused =
+                        linkerFocus === "conns" && connIdx === idx;
+                      return (
+                        <div
+                          key={c.id}
+                          className={`flex items-center gap-2 text-[12px] font-mono px-2.5 py-1.5 rounded-md transition-all duration-75 ${
+                            focused
+                              ? "bg-[var(--bg-link-selection)] ring-1 ring-[var(--red)]/30"
+                              : "hover:bg-[var(--bg-tertiary)]/40"
+                          }`}
+                        >
+                          <span
+                            className="w-[5px] h-[5px] rounded-full flex-shrink-0"
+                            style={{
+                              backgroundColor:
+                                EDGE_COLORS_BRIGHT[c.type] ||
+                                "var(--text-faint)",
+                            }}
+                          />
+                          <span className="text-[var(--text-muted)] text-[10px] w-[52px] flex-shrink-0">
+                            {c.type}
+                          </span>
+                          <span className="text-[var(--text-primary)] truncate flex-1">
+                            {getNodeTitle(tid)}
+                          </span>
+                          {focused && (
+                            <span className="text-[10px] text-[var(--red)] flex-shrink-0">
+                              d:unlink
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Link Type */}
+              <div
+                className={`px-4 py-2.5 border-b border-[var(--border)] transition-colors ${
+                  linkerFocus === "type" ? "bg-[var(--bg-link-active)]/40" : ""
+                }`}
+              >
+                {sectionIndicator("type", "Link Type")}
+                <div className="flex gap-1.5">
+                  {LINK_TYPES.map((lt, idx) => (
+                    <button
+                      key={lt.type}
+                      onClick={() => setLinkTypeIdx(idx)}
+                      className={`flex-1 py-2 rounded-lg text-[12px] font-mono font-medium transition-all duration-75 flex flex-col items-center gap-0.5 border ${
+                        linkTypeIdx === idx
+                          ? "text-[var(--text-primary)] font-bold"
+                          : "text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-[var(--bg-primary)] border-[var(--border)]"
+                      }`}
+                      style={
+                        linkTypeIdx === idx
+                          ? {
+                              backgroundColor: "var(--bg-link-selection)",
+                              borderColor: "var(--border-active)",
+                            }
+                          : undefined
+                      }
+                    >
+                      <span className="text-[14px]">{lt.icon}</span>
+                      <span>{lt.label}</span>
+                    </button>
+                  ))}
+                </div>
+                {linkerFocus === "type" && (
+                  <p className="text-[10px] text-[var(--text-muted)] font-mono mt-1.5 text-center">
+                    h/l type · j↓ candidates · k↑ connections
+                  </p>
+                )}
+              </div>
+
+              {/* Candidates */}
+              <div
+                className={`flex-1 flex flex-col min-h-0 px-4 py-2.5 transition-colors ${
+                  linkerFocus === "candidates" || linkerFocus === "filter"
+                    ? "bg-[var(--bg-link-active)]/40"
+                    : ""
+                }`}
+              >
+                {sectionIndicator("candidates", "Candidates")}
+                <div className="mb-2">
+                  <div className="relative">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[11px] text-[var(--text-muted)] font-mono">
+                      f/
+                    </span>
+                    <input
+                      ref={linkSearchRef}
+                      type="text"
+                      value={linkSearch}
+                      onChange={(e) => {
+                        setLinkSearch(e.target.value);
+                        setLinkCandIdx(0);
+                      }}
+                      onFocus={() => setLinkerFocus("filter")}
+                      placeholder="filter nodes…"
+                      className={`w-full pl-7 pr-3 py-1.5 bg-[var(--bg-input)] border rounded-md text-[12px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:outline-none transition-colors ${
+                        linkerFocus === "filter"
+                          ? "border-[var(--green)]/50"
+                          : "border-[var(--border)]"
+                      }`}
+                    />
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto custom-scrollbar space-y-0.5">
+                  {linkCandidates.length > 0 ? (
+                    linkCandidates.map((n, idx) => (
+                      <button
+                        key={n.id}
+                        onClick={() => validateAndLink(n.id)}
+                        className={`w-full text-left px-2.5 py-1.5 rounded-md text-[12px] font-mono transition-all duration-75 flex items-center gap-2 ${
+                          linkerFocus === "candidates" && linkCandIdx === idx
+                            ? "bg-[var(--bg-link-selection)] ring-1 ring-[var(--green)]/30 text-[var(--text-primary)]"
+                            : "text-[var(--text-secondary)] hover:bg-[var(--bg-tertiary)]/40"
+                        }`}
+                      >
+                        <span
+                          className="w-[5px] h-[5px] rounded-full flex-shrink-0"
+                          style={{ backgroundColor: getNodeColor(n) }}
+                        />
+                        <span className="truncate">{n.title}</span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="text-[var(--text-dimmed)] text-[11px] font-mono text-center py-4">
+                      {linkSearch ? "no matches" : "no candidates"}
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -2915,7 +3071,7 @@ export default function Dashboard() {
               }}
               placeholder="title"
               autoFocus
-              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-active)] rounded text-[14px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:border-[#8b5cf6]/40 focus:outline-none"
+              className="w-full px-3 py-2 bg-[var(--bg-primary)] border border-[var(--border-active)] rounded text-[14px] font-mono text-[var(--text-primary)] placeholder-[var(--text-faint)] focus:border-[var(--accent)]/40 focus:outline-none"
             />
             <div className="flex gap-2">
               <button
@@ -2924,7 +3080,7 @@ export default function Dashboard() {
                     createNode.mutate({ title: newTitle.trim(), content: "" });
                 }}
                 disabled={!newTitle.trim()}
-                className="flex-1 bg-[#8b5cf6] hover:bg-[#7c3aed] text-white py-1.5 rounded text-[12px] font-mono font-medium disabled:opacity-25"
+                className="flex-1 bg-[var(--accent)] hover:opacity-90 text-white py-1.5 rounded text-[12px] font-mono font-medium disabled:opacity-25"
               >
                 create
               </button>
@@ -2975,7 +3131,7 @@ export default function Dashboard() {
                           key={keys}
                           className="flex items-start gap-2 text-[12px] font-mono"
                         >
-                          <span className="text-[#d29922] min-w-[100px] flex-shrink-0">
+                          <span className="text-[var(--yellow)] min-w-[100px] flex-shrink-0">
                             {keys}
                           </span>
                           <span className="text-[var(--text-secondary)]">
@@ -3000,8 +3156,8 @@ export default function Dashboard() {
         <span
           className="font-bold px-2 py-0.5 rounded text-[11px] font-mono"
           style={{
-            backgroundColor: `${showLinker ? "#8b5cf6" : modeColor}20`,
-            color: showLinker ? "#8b5cf6" : modeColor,
+            backgroundColor: "var(--selection)",
+            color: showLinker ? "var(--accent)" : modeColor,
           }}
         >
           {showLinker ? "LINK" : vimMode === "VISUAL_LINE" ? "V-LINE" : vimMode}
@@ -3022,7 +3178,7 @@ export default function Dashboard() {
             "j↓ k↑ navigate · Enter or Space to link · k↑ back to type"}
           {!showLinker &&
             uiFocus === "list" &&
-            "j↓ k↑ navigate · l Enter open · n new · dd delete · / search · g graph · ? help"}
+            "j↓ k↑ navigate · l/Enter open · n new · dd delete · / search · g graph · ? help"}
           {!showLinker &&
             uiFocus === "editor" &&
             vimMode === "NORMAL" &&
@@ -3043,7 +3199,7 @@ export default function Dashboard() {
             "j↓ k↑ select lines · d delete · y yank · c change · > < indent · Esc cancel"}
         </span>
         {statusMsg && (
-          <span className="text-[12px] text-[#d29922] font-mono font-medium">
+          <span className="text-[12px] text-[var(--yellow)] font-mono font-medium">
             {statusMsg}
           </span>
         )}
