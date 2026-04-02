@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
 
+import type { PartialButFor, NodeDisplayData } from "sigma/types";
+import type { Settings } from "sigma/settings";
+
 type SigmaNodeEvent = {
   node: string;
   event: {
@@ -41,6 +44,10 @@ type GraphViewProps = {
   onLinkTargetClick?: (targetNodeId: string) => void;
   theme?: "dark" | "light";
 };
+
+// ━━━ AABB collision state (shared across label draw calls per frame) ━━━━━━━
+type Box = { x: number; y: number; w: number; h: number };
+let occupiedBoxes: Box[] = [];
 
 export default function GraphView({
   nodes,
@@ -82,16 +89,88 @@ export default function GraphView({
       labelFont: "Inter, system-ui, sans-serif",
       enableEdgeEvents: true,
       allowInvalidContainer: true,
+      // Let all candidate labels through — our AABB check handles filtering.
       labelRenderedSizeThreshold: 0,
+      // Grid pre-filters candidates per viewport cell. These values give
+      // a good spread of candidates without sending too many to the AABB pass.
+      labelDensity: 1,
+      labelGridCellSize: 100,
       zIndex: true,
+
+      // ━━━ Custom label renderer with real collision detection ━━━━━━━━━━━━
+      // Sigma's built-in LabelGrid is a rough heuristic (N labels per cell).
+      // It does NOT measure text or check bounding boxes.
+      // This override adds actual AABB collision: each label's pixel-exact
+      // bounding box (via measureText) is checked against all previously
+      // drawn labels. If it overlaps, it's skipped. Since Sigma's grid
+      // sorts candidates by node size (biggest first), hub/root labels
+      // naturally get priority.
+      defaultDrawNodeLabel: (
+        context: CanvasRenderingContext2D,
+        data: PartialButFor<
+          NodeDisplayData,
+          "x" | "y" | "size" | "label" | "color"
+        >,
+        settings: Settings
+      ) => {
+        if (!data.label) return;
+
+        const fontSize: number = settings.labelSize;
+        const font = `${settings.labelWeight} ${fontSize}px ${settings.labelFont}`;
+        context.font = font;
+
+        const textWidth = context.measureText(data.label).width;
+        const labelX = data.x + data.size + 3;
+        const labelY = data.y + fontSize / 3;
+
+        // Build bounding box with padding so labels don't touch
+        const pad = 4;
+        const box: Box = {
+          x: labelX - pad,
+          y: labelY - fontSize - pad,
+          w: textWidth + pad * 2,
+          h: fontSize + pad * 2,
+        };
+
+        // AABB collision check against every already-drawn label
+        for (let i = 0; i < occupiedBoxes.length; i++) {
+          const o = occupiedBoxes[i];
+          if (
+            box.x < o.x + o.w &&
+            box.x + box.w > o.x &&
+            box.y < o.y + o.h &&
+            box.y + box.h > o.y
+          ) {
+            return; // Collision → skip this label
+          }
+        }
+
+        // No collision → draw and register
+        occupiedBoxes.push(box);
+
+        const color = settings.labelColor.attribute
+          ? data[settings.labelColor.attribute] ||
+            settings.labelColor.color ||
+            "#000"
+          : settings.labelColor.color;
+
+        context.fillStyle = color;
+        context.fillText(data.label, labelX, labelY);
+      },
     });
 
+    // Reset collision boxes before each render frame
+    sigma.on("beforeRender", () => {
+      occupiedBoxes = [];
+    });
+
+    // nodeReducer: hide label for hovered node (tooltip handles it),
+    // and disable forceLabel so Sigma's grid stays in control of ordering.
     sigma.setSetting("nodeReducer", (node, data) => {
-      return {
-        ...data,
-        color: data.color,
-        label: data.hovered ? "" : data.label,
-      };
+      if (data.hovered === true) {
+        return { ...data, label: "", forceLabel: false };
+      }
+      return { ...data, forceLabel: false };
     });
 
     sigmaRef.current = sigma;
@@ -320,8 +399,7 @@ export default function GraphView({
       }
     });
 
-    // Calculate subtree widths for proper spacing; NOTE: otherwise, the tree will be able to get "F***** up", because some edges will be overlapping the other edges
-    // short language: basically one edge will have the same x, y coordinates with another edge
+    // Calculate subtree widths for proper spacing
     const getSubtreeWidth = (nodeId: string): number => {
       const children = (childrenMap.get(nodeId) || []).filter((id) =>
         hierarchyNodes.has(id)
@@ -345,7 +423,7 @@ export default function GraphView({
       return Math.max(childrenWidth, specialWidth);
     };
 
-    // Layout hierarchy nodes in tree structure; NOTE: the idea goes from Zettlekasten and mindmaps combined, kindaof
+    // Layout hierarchy nodes in tree structure
     const layoutTree = (
       id: string,
       depth: number,
@@ -370,7 +448,6 @@ export default function GraphView({
       // Minimum spacing between nodes to avoid overlap
       const minNodeSpacing = 300;
       const availableWidth = rightBound - leftBound;
-      const requiredWidth = totalWidth * minNodeSpacing; // REVIEW: not anymore needed
 
       // Use the larger of calculated spacing or minimum spacing
       const actualSpacing = Math.max(
@@ -399,7 +476,7 @@ export default function GraphView({
       layoutTree(root, 0, startX - treeWidth / 2, startX + treeWidth / 2);
     });
 
-    // Position special nodes around their parents, NOTE: very important, because otherwise, the layout might get "F***** up"
+    // Position special nodes around their parents
     const specialPositions = new Map<string, { x: number; y: number }>();
 
     specialNodes.forEach((info, nodeId) => {
@@ -416,11 +493,7 @@ export default function GraphView({
       const radius = 120;
       const totalSiblings = siblingsOfType.length;
 
-      // Start from top and go clockwise, REVIEW: the current small issue: at the count of 4 edges, there will be a link to the right
-      // this link with the edge will overlap with the main node text, for example if x is the node
-      //
-      //                       should be: x title
-      //                  how it appears: x --otle      REVIEW:
+      // Start from top and go clockwise
       const angleOffset = -Math.PI / 2;
       const angleStep = (Math.PI * 2) / totalSiblings;
       const angle = angleOffset + index * angleStep;
