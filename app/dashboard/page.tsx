@@ -2408,7 +2408,7 @@ export default function Dashboard() {
           {relNum || lineNum}
         </span>
         <div
-          className={`flex-1 min-w-0 font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] break-words ${
+          className={`flex-1 min-w-0 whitespace-pre-wrap font-mono text-[14px] leading-[22px] text-[var(--text-secondary)] break-words ${
             fmt.className || ""
           }`}
         >

@@ -63,7 +63,7 @@ export function renderFmt(t: string): {
       content: renderInl(t.slice(2)),
     };
 
-  if (t.trim() === "") return { content: [] };
+  if (t.trim() === "") return { content: ["\u00A0"] };
   return { content: renderInl(t) };
 }
 
