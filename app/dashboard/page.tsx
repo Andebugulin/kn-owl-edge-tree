@@ -171,6 +171,10 @@ export default function Dashboard() {
   }, []);
   const gTimerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // ━━━ Sidebar collapse + scroll ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const listItemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
   // ★ VimCtx — shared context for all vim operations
   const vimCtx: VimCtx = useMemo(
     () => ({
@@ -356,17 +360,22 @@ export default function Dashboard() {
       ...selectedNode.edgesTo.map((e) => ({ ...e, dir: "in" as const })),
     ];
   }, [selectedNode]);
-  // ★ Tree-sorted flat list — groups nodes by tree structure, depth-first
+
   // Special nodes (ref/example/contradiction) appear right after their parent node
+  // ★ Tree-sorted flat list with tree-command prefixes and collapse support
   const treeSorted = useMemo((): Array<{
     node: Node;
     depth: number;
     specialType?: string;
+    prefix: string;
+    hasChildren: boolean;
+    isRoot: boolean;
   }> => {
     if (!nodes) return [];
+
+    // Build parent→children map
     const childrenOf = new Map<string, string[]>();
     const childSet = new Set<string>();
-    // Track which nodes are special (toNode of a ref/example/contradiction edge)
     const specialNodeIds = new Set<string>();
     nodes.forEach((n) => {
       n.edgesFrom.forEach((e) => {
@@ -380,38 +389,99 @@ export default function Dashboard() {
         }
       });
     });
-    const result: Array<{ node: Node; depth: number; specialType?: string }> =
-      [];
+
+    const result: Array<{
+      node: Node;
+      depth: number;
+      specialType?: string;
+      prefix: string;
+      hasChildren: boolean;
+      isRoot: boolean;
+    }> = [];
     const visited = new Set<string>();
-    const visit = (id: string, d: number) => {
+
+    // Build tree-command style prefix from ancestor flags
+    const mkPrefix = (
+      ancestors: boolean[],
+      isLast: boolean,
+      isRoot: boolean
+    ): string => {
+      if (isRoot) return "";
+      let p = "";
+      for (const hasMore of ancestors) p += hasMore ? "│  " : "   ";
+      return p + (isLast ? "└─ " : "├─ ");
+    };
+
+    const visit = (
+      id: string,
+      d: number,
+      ancestors: boolean[],
+      isLast: boolean,
+      isRoot: boolean
+    ) => {
       if (visited.has(id)) return;
       visited.add(id);
       const n = nodes.find((x) => x.id === id);
       if (!n) return;
-      result.push({ node: n, depth: d });
-      // Insert special nodes (ref/example/contradiction) right after this node
-      n.edgesFrom
-        .filter((e) => e.type !== "parent")
-        .forEach((e) => {
-          if (visited.has(e.toNodeId)) return;
-          visited.add(e.toNodeId);
-          const sn = nodes.find((x) => x.id === e.toNodeId);
+
+      const children = childrenOf.get(id) || [];
+      const specials = n.edgesFrom.filter((e) => e.type !== "parent");
+      const hasChildren = children.length > 0 || specials.length > 0;
+
+      result.push({
+        node: n,
+        depth: d,
+        prefix: mkPrefix(ancestors, isLast, isRoot),
+        hasChildren,
+        isRoot,
+      });
+
+      // If collapsed, skip all children
+      if (hasChildren && !expanded.has(id)) return;
+
+      // Collect all child items: specials first, then tree children
+      const nextAncestors = isRoot ? [] : [...ancestors, !isLast];
+      const allItems: Array<{
+        id: string;
+        isSpecial: boolean;
+        type?: string;
+      }> = [];
+      specials.forEach((e) =>
+        allItems.push({ id: e.toNodeId, isSpecial: true, type: e.type })
+      );
+      children.forEach((cid) => allItems.push({ id: cid, isSpecial: false }));
+
+      allItems.forEach((item, i) => {
+        const last = i === allItems.length - 1;
+        if (item.isSpecial) {
+          if (visited.has(item.id)) return;
+          visited.add(item.id);
+          const sn = nodes.find((x) => x.id === item.id);
           if (!sn) return;
-          result.push({ node: sn, depth: d + 1, specialType: e.type });
-        });
-      (childrenOf.get(id) || []).forEach((cid) => visit(cid, d + 1));
+          result.push({
+            node: sn,
+            depth: d + 1,
+            specialType: item.type,
+            prefix: mkPrefix(nextAncestors, last, false),
+            hasChildren: false,
+            isRoot: false,
+          });
+        } else {
+          visit(item.id, d + 1, nextAncestors, last, false);
+        }
+      });
     };
-    // Roots first, then orphans (excluding special nodes)
-    nodes
+
+    // Roots with children, then orphans
+    const roots = nodes
       .filter(
         (n) =>
           !childSet.has(n.id) &&
           !specialNodeIds.has(n.id) &&
           childrenOf.has(n.id)
       )
-      .sort((a, b) => a.title.localeCompare(b.title))
-      .forEach((n) => visit(n.id, 0));
-    nodes
+      .sort((a, b) => a.title.localeCompare(b.title));
+    const orphans = nodes
       .filter(
         (n) =>
           !childSet.has(n.id) &&
@@ -421,13 +491,32 @@ export default function Dashboard() {
       .sort(
         (a, b) =>
           new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      )
-      .forEach((n) => visit(n.id, 0));
+      );
+
+    const allRoots = [...roots, ...orphans];
+    allRoots.forEach((n, i) => {
+      visit(n.id, 0, [], i === allRoots.length - 1, true);
+    });
+
+    // Safety net — only truly orphaned nodes, not children hidden by collapse
     nodes.forEach((n) => {
-      if (!visited.has(n.id)) visit(n.id, 0);
-    }); // safety net
+      if (
+        !visited.has(n.id) &&
+        !childSet.has(n.id) &&
+        !specialNodeIds.has(n.id)
+      ) {
+        visit(n.id, 0, [], true, true);
+      }
+    });
+
     return result;
-  }, [nodes]);
+  }, [nodes, expanded]);
+
+  // Auto-scroll sidebar to keep cursor visible
+  useEffect(() => {
+    const el = listItemRefs.current.get(listIdx);
+    if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [listIdx]);
 
   const linkCandidates = useMemo(() => {
     if (!selectedNodeId || !nodes) return [];
@@ -510,6 +599,35 @@ export default function Dashboard() {
     const { title, content } = extractDoc(linesRef.current);
     updateNode.mutate({ id: selectedNodeId, title, content });
   }, [selectedNodeId, updateNode]);
+
+  // Walk up parent edges to find all ancestors of a node
+  const expandAncestors = useCallback(
+    (nodeId: string) => {
+      if (!nodes) return;
+      const toExpand: string[] = [];
+      const visited = new Set<string>();
+      let current = nodeId;
+      while (true) {
+        if (visited.has(current)) break;
+        visited.add(current);
+        const node = nodes.find((n) => n.id === current);
+        if (!node) break;
+        const parentEdge = node.edgesTo.find((e) => e.type === "parent");
+        if (!parentEdge) break;
+        toExpand.push(parentEdge.fromNodeId);
+        current = parentEdge.fromNodeId;
+      }
+      if (toExpand.length > 0) {
+        setExpanded((s) => {
+          const next = new Set(s);
+          toExpand.forEach((id) => next.add(id));
+          return next;
+        });
+      }
+    },
+    [nodes]
+  );
+
   const selectNode = useCallback(
     (nodeId: string) => {
       if (
@@ -520,6 +638,7 @@ export default function Dashboard() {
         const { title, content } = extractDoc(linesRef.current);
         updateNode.mutate({ id: selectedNodeId, title, content });
       }
+      expandAncestors(nodeId);
       const node = nodes?.find((n) => n.id === nodeId);
       if (!node) return;
       setSelectedNodeId(nodeId);
@@ -534,7 +653,7 @@ export default function Dashboard() {
       const idx = treeSorted.findIndex((s) => s.node.id === nodeId);
       if (idx >= 0) setListIdx(idx);
     },
-    [nodes, treeSorted, selectedNodeId, updateNode]
+    [nodes, treeSorted, selectedNodeId, updateNode, expandAncestors]
   );
 
   const validateAndLink = useCallback(
@@ -1084,22 +1203,38 @@ export default function Dashboard() {
         if (pendingKey) {
           setPendingKey(null);
         }
-        if (e.key === "j") {
+        if (e.key === "j" || e.key === "ArrowDown") {
           e.preventDefault();
           setListIdx((i) => Math.min(i + 1, treeSorted.length - 1));
           return;
         }
-        if (e.key === "k") {
+        if (e.key === "k" || e.key === "ArrowUp") {
           e.preventDefault();
           setListIdx((i) => Math.max(i - 1, 0));
           return;
         }
-        if (e.key === "l" || e.key === "Enter") {
+        if (e.key === "h" || e.key === "ArrowLeft") {
           e.preventDefault();
-          if (treeSorted[listIdx]) {
-            selectNode(treeSorted[listIdx].node.id);
-            setUIFocus("editor");
+          const item = treeSorted[listIdx];
+          if (item && item.hasChildren && expanded.has(item.node.id)) {
+            setExpanded((s) => {
+              const next = new Set(s);
+              next.delete(item.node.id);
+              return next;
+            });
           }
+          return;
+        }
+        if (e.key === "l" || e.key === "Enter" || e.key === "ArrowRight") {
+          e.preventDefault();
+          const item = treeSorted[listIdx];
+          if (!item) return;
+          if (item.hasChildren && !expanded.has(item.node.id)) {
+            setExpanded((s) => new Set(s).add(item.node.id));
+            return;
+          }
+          selectNode(item.node.id);
+          setUIFocus("editor");
           return;
         }
         if (e.key === "n") {
@@ -2593,23 +2728,57 @@ export default function Dashboard() {
                     {treeSorted.map((item, idx) => {
                       const isActive = item.node.id === selectedNodeId;
                       const isCur = idx === listIdx && uiFocus === "list";
+                      const isCollapsedNode =
+                        item.hasChildren && !expanded.has(item.node.id);
                       return (
                         <div
                           key={item.node.id}
+                          ref={(el) => {
+                            if (el) listItemRefs.current.set(idx, el);
+                            else listItemRefs.current.delete(idx);
+                          }}
                           onClick={() => {
                             selectNode(item.node.id);
                             setListIdx(idx);
                             setUIFocus("editor");
                           }}
-                          className={`flex items-center gap-1.5 cursor-pointer transition-all duration-75 border-l-[3px] pr-2 py-1.5 ${
+                          className={`flex items-center cursor-pointer transition-all duration-75 border-l-[3px] pr-2 py-[3px] ${
                             isActive
                               ? "bg-[var(--bg-tertiary)] border-l-[var(--accent)]"
                               : isCur
                               ? "bg-[var(--selection)] border-l-[var(--green)]"
                               : "border-l-transparent hover:bg-[var(--bg-tertiary)]/30"
                           }`}
-                          style={{ paddingLeft: `${8 + item.depth * 12}px` }}
+                          style={{ paddingLeft: "6px" }}
                         >
+                          {/* Tree connectors */}
+                          {item.prefix && (
+                            <span className="text-[var(--text-dimmed)] text-[11px] font-mono whitespace-pre flex-shrink-0 select-none">
+                              {item.prefix}
+                            </span>
+                          )}
+                          {/* Collapse chevron or spacer */}
+                          {item.hasChildren ? (
+                            <span
+                              className="text-[13px] font-mono text-[var(--text-muted)] flex-shrink-0 w-4 select-none cursor-pointer"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setExpanded((s) => {
+                                  const next = new Set(s);
+                                  if (next.has(item.node.id))
+                                    next.delete(item.node.id);
+                                  else next.add(item.node.id);
+                                  return next;
+                                });
+                                setListIdx(idx);
+                              }}
+                            >
+                              {isCollapsedNode ? "▶" : "▼"}{" "}
+                            </span>
+                          ) : (
+                            <span className="w-3 flex-shrink-0" />
+                          )}
+                          {/* Type badge or dot */}
                           {item.specialType ? (
                             <span
                               className="text-[9px] font-mono font-medium flex-shrink-0 px-1 rounded"
@@ -2630,7 +2799,7 @@ export default function Dashboard() {
                             />
                           )}
                           <span
-                            className={`text-[12px] font-mono truncate flex-1 ${
+                            className={`text-[12px] font-mono truncate flex-1 ml-1.5 ${
                               isActive || isCur
                                 ? "text-[var(--text-primary)]"
                                 : item.specialType
@@ -2642,7 +2811,7 @@ export default function Dashboard() {
                           </span>
                           {isCur && (
                             <span className="text-[9px] text-[var(--green)] font-mono flex-shrink-0">
-                              ▸
+                              ◂
                             </span>
                           )}
                         </div>
