@@ -399,82 +399,118 @@ export default function GraphView({
       }
     });
 
-    // Calculate subtree widths for proper spacing
-    const getSubtreeWidth = (nodeId: string): number => {
+    // ━━━ Layout constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    const NODE_H_SPACING = 400;   // min horizontal px between leaf centers
+    const LEVEL_V_SPACING = 320;  // vertical px between tree levels
+    const INTER_TREE_GAP = 800;   // min gap between adjacent trees
+    const SPECIAL_RADIUS = 150;   // orbit radius for special nodes
+
+    // Count leaf nodes in a subtree (the true measure of width)
+    const getLeafCount = (nodeId: string, seen: Set<string>): number => {
+      if (seen.has(nodeId)) return 1;
+      seen.add(nodeId);
       const children = (childrenMap.get(nodeId) || []).filter((id) =>
         hierarchyNodes.has(id)
       );
-
-      // Count special nodes attached to this node
-      const specialCount = Array.from(specialNodes.entries()).filter(
-        ([_, data]) => data.parentId === nodeId
-      ).length;
-
-      // Add extra width if this node has special nodes around it
-      const specialWidth = specialCount > 0 ? 1.5 : 1;
-
-      if (children.length === 0) return specialWidth;
-
-      const childrenWidth = children.reduce(
-        (sum, childId) => sum + getSubtreeWidth(childId),
+      if (children.length === 0) return 1;
+      return children.reduce(
+        (sum, cid) => sum + getLeafCount(cid, seen),
         0
       );
-
-      return Math.max(childrenWidth, specialWidth);
     };
 
-    // Layout hierarchy nodes in tree structure
+    // Layout a single tree — each leaf gets exactly NODE_H_SPACING width
     const layoutTree = (
       id: string,
       depth: number,
-      leftBound: number,
-      rightBound: number
-    ) => {
-      if (visited.has(id) || !hierarchyNodes.has(id)) return;
-      visited.add(id);
-
-      const centerX = (leftBound + rightBound) / 2;
-      const y = depth * 250 + 100;
-      positions.set(id, { x: centerX, y });
+      leftX: number,
+      seen: Set<string>
+    ): number => {
+      // Returns the rightmost x used by this subtree
+      if (seen.has(id) || !hierarchyNodes.has(id)) return leftX;
+      seen.add(id);
 
       const children = (childrenMap.get(id) || []).filter((cid) =>
-        hierarchyNodes.has(cid)
-      );
-      if (children.length === 0) return;
-
-      const childWidths = children.map((cid) => getSubtreeWidth(cid));
-      const totalWidth = childWidths.reduce((a, b) => a + b, 0);
-
-      // Minimum spacing between nodes to avoid overlap
-      const minNodeSpacing = 300;
-      const availableWidth = rightBound - leftBound;
-
-      // Use the larger of calculated spacing or minimum spacing
-      const actualSpacing = Math.max(
-        availableWidth / totalWidth,
-        minNodeSpacing
+        hierarchyNodes.has(cid) && !seen.has(cid)
       );
 
-      let currentX = leftBound;
+      const y = depth * LEVEL_V_SPACING;
+
+      if (children.length === 0) {
+        // Leaf node — place at leftX
+        positions.set(id, { x: leftX, y });
+        return leftX;
+      }
+
+      // Layout children left-to-right, accumulating actual used width
+      let cursor = leftX;
+      const childPositions: number[] = [];
+
       children.forEach((childId, i) => {
-        const childWidth = childWidths[i];
-        const childSpace = childWidth * actualSpacing;
-        const childLeft = currentX;
-        const childRight = currentX + childSpace;
-        layoutTree(childId, depth + 1, childLeft, childRight);
-        currentX = childRight;
+        const rightEdge = layoutTree(childId, depth + 1, cursor, seen);
+        const childPos = positions.get(childId);
+        childPositions.push(childPos ? childPos.x : cursor);
+        // Next child starts NODE_H_SPACING past the rightmost leaf of this child
+        cursor = rightEdge + NODE_H_SPACING;
       });
+
+      // Center parent above its children
+      const firstChildX = childPositions[0];
+      const lastChildX = childPositions[childPositions.length - 1];
+      const centerX = (firstChildX + lastChildX) / 2;
+
+      positions.set(id, { x: centerX, y });
+
+      // Return the rightmost x used in this subtree
+      return cursor - NODE_H_SPACING;
     };
 
-    // Layout roots
+    // ━━━ Place each tree sequentially — no fixed spacing ━━━━━━━━━━━━━━━━
     const roots = Array.from(rootNodes).filter((id) => hierarchyNodes.has(id));
-    const treeSpacing = 800;
-    roots.forEach((root, rootIndex) => {
-      const width = getSubtreeWidth(root);
-      const treeWidth = width * 250;
-      const startX = rootIndex * treeSpacing;
-      layoutTree(root, 0, startX - treeWidth / 2, startX + treeWidth / 2);
+
+    // Sort roots: widest trees first so the big ones get prime real estate
+    roots.sort((a, b) => {
+      const wa = getLeafCount(a, new Set());
+      const wb = getLeafCount(b, new Set());
+      return wb - wa;
     });
+
+    let nextTreeLeft = 0;
+
+    roots.forEach((root) => {
+      const treeSeen = new Set<string>();
+      // Pre-calculate leaf count to know width before layout
+      const leafCount = getLeafCount(root, new Set());
+      const estimatedWidth = Math.max(leafCount - 1, 0) * NODE_H_SPACING;
+
+      layoutTree(root, 0, nextTreeLeft, treeSeen);
+
+      // Mark these nodes as globally visited
+      treeSeen.forEach((id) => visited.add(id));
+
+      // Find actual bounds of this tree
+      let maxX = nextTreeLeft;
+      treeSeen.forEach((id) => {
+        const pos = positions.get(id);
+        if (pos && pos.x > maxX) maxX = pos.x;
+      });
+
+      // Next tree starts well past the right edge
+      nextTreeLeft = maxX + INTER_TREE_GAP;
+    });
+
+    // Place orphan hierarchy nodes (visited by no tree) in a clean row below
+    const orphans = Array.from(hierarchyNodes).filter((id) => !visited.has(id));
+    if (orphans.length > 0) {
+      // Find lowest y used so far
+      let maxY = 0;
+      positions.forEach((pos) => { if (pos.y > maxY) maxY = pos.y; });
+      const orphanY = maxY + LEVEL_V_SPACING * 2;
+      orphans.forEach((id, i) => {
+        positions.set(id, { x: i * NODE_H_SPACING, y: orphanY });
+        visited.add(id);
+      });
+    }
 
     // Position special nodes around their parents
     const specialPositions = new Map<string, { x: number; y: number }>();
@@ -490,7 +526,7 @@ export default function GraphView({
       const index = siblingsOfType.findIndex(([id]) => id === nodeId);
 
       // Arrange in circle around parent with enough spacing
-      const radius = 120;
+      const radius = SPECIAL_RADIUS;
       const totalSiblings = siblingsOfType.length;
 
       // Start from top and go clockwise
@@ -524,13 +560,13 @@ export default function GraphView({
           const dy = adjusted.y - otherPos.y;
           const distance = Math.sqrt(dx * dx + dy * dy);
 
-          if (distance < 100) {
+          if (distance < 150) {
             // Minimum distance between nodes
             hasOverlap = true;
             // Push away from overlapping node
             const pushAngle = Math.atan2(dy, dx);
-            adjusted.x += Math.cos(pushAngle) * 50;
-            adjusted.y += Math.sin(pushAngle) * 50;
+            adjusted.x += Math.cos(pushAngle) * 80;
+            adjusted.y += Math.sin(pushAngle) * 80;
           }
         }
 
