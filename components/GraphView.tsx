@@ -400,10 +400,16 @@ export default function GraphView({
     });
 
     // ━━━ Layout constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    const NODE_H_SPACING = 400;   // min horizontal px between leaf centers
-    const LEVEL_V_SPACING = 320;  // vertical px between tree levels
-    const INTER_TREE_GAP = 800;   // min gap between adjacent trees
-    const SPECIAL_RADIUS = 150;   // orbit radius for special nodes
+    const NODE_H_SPACING = 400; // min horizontal px between leaf centers
+    const BASE_V_SPACING = 280; // vertical spacing for small trees
+    const V_SPACING_PER_LEAF = 20; // extra vertical px per leaf node
+    const MAX_V_SPACING = 900; // cap so huge trees don't become infinitely tall
+    const INTER_TREE_GAP = 800; // min gap between adjacent trees
+    const SPECIAL_RADIUS = 150; // orbit radius for special nodes
+
+    // Wider trees need proportionally more height to look natural
+    const getTreeVSpacing = (leafCount: number): number =>
+      Math.min(MAX_V_SPACING, BASE_V_SPACING + leafCount * V_SPACING_PER_LEAF);
 
     // Count leaf nodes in a subtree (the true measure of width)
     const getLeafCount = (nodeId: string, seen: Set<string>): number => {
@@ -413,10 +419,7 @@ export default function GraphView({
         hierarchyNodes.has(id)
       );
       if (children.length === 0) return 1;
-      return children.reduce(
-        (sum, cid) => sum + getLeafCount(cid, seen),
-        0
-      );
+      return children.reduce((sum, cid) => sum + getLeafCount(cid, seen), 0);
     };
 
     // Layout a single tree — each leaf gets exactly NODE_H_SPACING width
@@ -424,17 +427,18 @@ export default function GraphView({
       id: string,
       depth: number,
       leftX: number,
-      seen: Set<string>
+      seen: Set<string>,
+      vSpacing: number
     ): number => {
       // Returns the rightmost x used by this subtree
       if (seen.has(id) || !hierarchyNodes.has(id)) return leftX;
       seen.add(id);
 
-      const children = (childrenMap.get(id) || []).filter((cid) =>
-        hierarchyNodes.has(cid) && !seen.has(cid)
+      const children = (childrenMap.get(id) || []).filter(
+        (cid) => hierarchyNodes.has(cid) && !seen.has(cid)
       );
 
-      const y = depth * LEVEL_V_SPACING;
+      const y = depth * vSpacing;
 
       if (children.length === 0) {
         // Leaf node — place at leftX
@@ -447,7 +451,13 @@ export default function GraphView({
       const childPositions: number[] = [];
 
       children.forEach((childId, i) => {
-        const rightEdge = layoutTree(childId, depth + 1, cursor, seen);
+        const rightEdge = layoutTree(
+          childId,
+          depth + 1,
+          cursor,
+          seen,
+          vSpacing
+        );
         const childPos = positions.get(childId);
         childPositions.push(childPos ? childPos.x : cursor);
         // Next child starts NODE_H_SPACING past the rightmost leaf of this child
@@ -479,11 +489,10 @@ export default function GraphView({
 
     roots.forEach((root) => {
       const treeSeen = new Set<string>();
-      // Pre-calculate leaf count to know width before layout
       const leafCount = getLeafCount(root, new Set());
-      const estimatedWidth = Math.max(leafCount - 1, 0) * NODE_H_SPACING;
+      const vSpacing = getTreeVSpacing(leafCount);
 
-      layoutTree(root, 0, nextTreeLeft, treeSeen);
+      layoutTree(root, 0, nextTreeLeft, treeSeen, vSpacing);
 
       // Mark these nodes as globally visited
       treeSeen.forEach((id) => visited.add(id));
@@ -504,8 +513,10 @@ export default function GraphView({
     if (orphans.length > 0) {
       // Find lowest y used so far
       let maxY = 0;
-      positions.forEach((pos) => { if (pos.y > maxY) maxY = pos.y; });
-      const orphanY = maxY + LEVEL_V_SPACING * 2;
+      positions.forEach((pos) => {
+        if (pos.y > maxY) maxY = pos.y;
+      });
+      const orphanY = maxY + BASE_V_SPACING * 2;
       orphans.forEach((id, i) => {
         positions.set(id, { x: i * NODE_H_SPACING, y: orphanY });
         visited.add(id);
