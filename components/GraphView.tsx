@@ -400,16 +400,49 @@ export default function GraphView({
     });
 
     // ━━━ Layout constants ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    const NODE_H_SPACING = 400; // min horizontal px between leaf centers
+    const MIN_H_SPACING = 400; // absolute minimum horizontal gap between nodes
     const BASE_V_SPACING = 280; // vertical spacing for small trees
     const V_SPACING_PER_LEAF = 20; // extra vertical px per leaf node
     const MAX_V_SPACING = 900; // cap so huge trees don't become infinitely tall
     const INTER_TREE_GAP = 800; // min gap between adjacent trees
     const SPECIAL_RADIUS = 150; // orbit radius for special nodes
+    const PX_PER_CHAR = 8.5; // approx width per char at 15px Inter 400
+    const LABEL_PAD = 50; // circle radius + gap + breathing room
 
     // Wider trees need proportionally more height to look natural
     const getTreeVSpacing = (leafCount: number): number =>
       Math.min(MAX_V_SPACING, BASE_V_SPACING + leafCount * V_SPACING_PER_LEAF);
+
+    // Estimate how much horizontal space a node's label needs
+    const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+    const labelWidth = (nodeId: string): number => {
+      const n = nodeMap.get(nodeId);
+      if (!n) return 0;
+      return n.title.length * PX_PER_CHAR + LABEL_PAD;
+    };
+
+    // The space two adjacent nodes need between their centers
+    // so neither label overlaps the other node's circle
+    const spacingBetween = (leftId: string, rightId: string): number => {
+      // Left node's label extends rightward, right node's circle is at its center
+      const leftLabelW = labelWidth(leftId);
+      // Right node needs some left-side clearance too (circle radius)
+      const rightClear = 20;
+      return Math.max(MIN_H_SPACING, leftLabelW + rightClear);
+    };
+
+    // Vertical y for a given depth — first 2 levels get extra breathing room
+    const depthY = (depth: number, vSpacing: number): number => {
+      if (depth === 0) return 0;
+      // Level 0→1 gets 1.6× spacing, 1→2 gets 1.3×, rest is normal
+      let y = 0;
+      for (let d = 0; d < depth; d++) {
+        if (d === 0) y += vSpacing * 1.6;
+        else if (d === 1) y += vSpacing * 1.3;
+        else y += vSpacing;
+      }
+      return y;
+    };
 
     // Count leaf nodes in a subtree (the true measure of width)
     const getLeafCount = (nodeId: string, seen: Set<string>): number => {
@@ -422,7 +455,7 @@ export default function GraphView({
       return children.reduce((sum, cid) => sum + getLeafCount(cid, seen), 0);
     };
 
-    // Layout a single tree — each leaf gets exactly NODE_H_SPACING width
+    // Layout a single tree — spacing adapts to label widths
     const layoutTree = (
       id: string,
       depth: number,
@@ -438,7 +471,7 @@ export default function GraphView({
         (cid) => hierarchyNodes.has(cid) && !seen.has(cid)
       );
 
-      const y = depth * vSpacing;
+      const y = depthY(depth, vSpacing);
 
       if (children.length === 0) {
         // Leaf node — place at leftX
@@ -446,7 +479,7 @@ export default function GraphView({
         return leftX;
       }
 
-      // Layout children left-to-right, accumulating actual used width
+      // Layout children left-to-right with text-aware gaps
       let cursor = leftX;
       const childPositions: number[] = [];
 
@@ -460,8 +493,14 @@ export default function GraphView({
         );
         const childPos = positions.get(childId);
         childPositions.push(childPos ? childPos.x : cursor);
-        // Next child starts NODE_H_SPACING past the rightmost leaf of this child
-        cursor = rightEdge + NODE_H_SPACING;
+
+        // Gap to next sibling accounts for this child's label width
+        if (i < children.length - 1) {
+          const gap = spacingBetween(childId, children[i + 1]);
+          cursor = rightEdge + gap;
+        } else {
+          cursor = rightEdge;
+        }
       });
 
       // Center parent above its children
@@ -472,7 +511,7 @@ export default function GraphView({
       positions.set(id, { x: centerX, y });
 
       // Return the rightmost x used in this subtree
-      return cursor - NODE_H_SPACING;
+      return cursor;
     };
 
     // ━━━ Place each tree sequentially — no fixed spacing ━━━━━━━━━━━━━━━━
@@ -497,15 +536,19 @@ export default function GraphView({
       // Mark these nodes as globally visited
       treeSeen.forEach((id) => visited.add(id));
 
-      // Find actual bounds of this tree
+      // Find actual bounds of this tree (including label overhang)
       let maxX = nextTreeLeft;
+      let rightmostId = root;
       treeSeen.forEach((id) => {
         const pos = positions.get(id);
-        if (pos && pos.x > maxX) maxX = pos.x;
+        if (pos && pos.x > maxX) {
+          maxX = pos.x;
+          rightmostId = id;
+        }
       });
 
-      // Next tree starts well past the right edge
-      nextTreeLeft = maxX + INTER_TREE_GAP;
+      // Next tree starts past the right edge + rightmost label width
+      nextTreeLeft = maxX + labelWidth(rightmostId) + INTER_TREE_GAP;
     });
 
     // Place orphan hierarchy nodes (visited by no tree) in a clean row below
@@ -518,7 +561,7 @@ export default function GraphView({
       });
       const orphanY = maxY + BASE_V_SPACING * 2;
       orphans.forEach((id, i) => {
-        positions.set(id, { x: i * NODE_H_SPACING, y: orphanY });
+        positions.set(id, { x: i * MIN_H_SPACING, y: orphanY });
         visited.add(id);
       });
     }
